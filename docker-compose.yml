@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    container_name: server-monitor-app
+    restart: unless-stopped
+    ports:
+      - "770:8080" # Снаружи сервера порт 770, внутри контейнера — 8080
+    volumes:
+      - monitor-data:/app/data
+    environment:
+      - DB_PATH=/app/data/server-monitor.db
+
+volumes:
+  monitor-data:

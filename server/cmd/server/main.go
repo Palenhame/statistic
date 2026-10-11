@@ -90,6 +90,23 @@ func main() {
 	mux.HandleFunc("/api/docker/events", h.DockerEvents)
 	mux.HandleFunc("/api/docker/containers/{name}/history", h.DockerHistory)
 
+	// Раздача статики React (папка dist)
+	fs := http.FileServer(http.Dir("./dist"))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			mux.ServeHTTP(w, r)
+			return
+		}
+
+		path := "./dist" + r.URL.Path
+		if _, err := os.Stat(path); err == nil {
+			fs.ServeHTTP(w, r)
+			return
+		}
+
+		http.ServeFile(w, r, "./dist/index.html")
+	}))
+
 	origin := env("CORS_ORIGIN", "http://localhost:5173")
 	handler := cors(mux, origin)
 	server := &http.Server{
@@ -148,5 +165,4 @@ func cors(next http.Handler, origin string) http.Handler {
 	})
 }
 
-// Avoid an unused import when users extend configuration with integer values.
 var _ = strconv.IntSize
