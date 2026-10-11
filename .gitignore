@@ -1,0 +1,41 @@
+# Зависимости Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Сборка веб-клиента (Vite / React)
+web/dist/
+web/dist-ssr/
+*.local
+
+# Базы данных SQLite и служебные файлы WAL/SHM
+*.db
+*.db-shm
+*.db-wal
+
+# Скомпилированные файлы Go
+*.exe
+*.exe?
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+server/server
+server/cmd/app
+
+# Архивы
+*.zip
+*.tar.gz
+*.tgz
+
+# Окружение и IDE
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
