@@ -89,21 +89,18 @@ func main() {
 	mux.HandleFunc("/api/docker/summary", h.DockerSummary)
 	mux.HandleFunc("/api/docker/events", h.DockerEvents)
 	mux.HandleFunc("/api/docker/containers/{name}/history", h.DockerHistory)
+	mux.HandleFunc("/api/docker/containers/{name}/logs", h.DockerLogs)
+	mux.HandleFunc("/api/docker/containers/{name}/restart", h.DockerRestart)
 
-	// Раздача статики React (папка dist)
+	// Static files — use http.FileServer directly; it sanitises paths internally.
 	fs := http.FileServer(http.Dir("./dist"))
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			mux.ServeHTTP(w, r)
-			return
-		}
-
+		// Try to serve the exact file; fall back to index.html for SPA routing.
 		path := "./dist" + r.URL.Path
-		if _, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
 			fs.ServeHTTP(w, r)
 			return
 		}
-
 		http.ServeFile(w, r, "./dist/index.html")
 	}))
 
@@ -147,22 +144,21 @@ func envInt(key string, fallback int) int {
 func cors(next http.Handler, origin string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestOrigin := r.Header.Get("Origin")
-		if requestOrigin == origin || requestOrigin == "" {
+		// Only set the header when the request actually carries an Origin.
+		if requestOrigin != "" && requestOrigin == origin {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
 		w.Header().Set("Vary", "Origin")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if r.Method != http.MethodGet {
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
-
-var _ = strconv.IntSize

@@ -7,6 +7,8 @@ yarn-error.log*
 # Сборка веб-клиента (Vite / React)
 web/dist/
 web/dist-ssr/
+server/dist/
+*.tsbuildinfo
 *.local
 
 # Базы данных SQLite и служебные файлы WAL/SHM

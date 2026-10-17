@@ -19,7 +19,7 @@ COPY --from=web-builder /app/web/dist /app/server/dist
 RUN CGO_ENABLED=0 GOOS=linux go build -o /app/server-binary ./cmd/server
 
 # Этап 3: Финальный минималистичный образ
-FROM alpine:latest
+FROM alpine:3.20
 WORKDIR /app
 
 # Копируем бинарник и статику фронтенда

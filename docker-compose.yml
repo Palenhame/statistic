@@ -7,8 +7,12 @@ services:
       - "770:8080" # Снаружи сервера порт 770, внутри контейнера — 8080
     volumes:
       - monitor-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
       - DB_PATH=/app/data/server-monitor.db
+      - DOCKER_DB_PATH=/app/data/server-monitor-docker.db
+      # Uncomment to enable auth:
+      # - SECRET_TOKEN=change-me-to-a-strong-random-value
 
 volumes:
   monitor-data:

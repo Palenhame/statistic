@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -49,7 +50,8 @@ func (h *Handler) DockerSummary(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := h.docker.Summary(r.Context(), d)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("docker summary: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	if items == nil {
@@ -69,7 +71,8 @@ func (h *Handler) DockerHistory(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := h.docker.History(r.Context(), r.PathValue("name"), d)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("docker history: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -88,8 +91,54 @@ func (h *Handler) DockerEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	items, err := h.docker.Events(r.Context(), r.URL.Query().Get("container"), limit)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		log.Printf("docker events: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
 }
+
+func (h *Handler) DockerLogs(w http.ResponseWriter, r *http.Request) {
+	if h.docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "docker monitoring disabled"})
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "container name required"})
+		return
+	}
+	tail := 300
+	if v := r.URL.Query().Get("tail"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 2000 {
+			tail = n
+		}
+	}
+	logs, err := h.docker.Logs(r.Context(), name, tail)
+	if err != nil {
+		log.Printf("docker logs for %s: %v", name, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch logs"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"logs": logs})
+}
+
+func (h *Handler) DockerRestart(w http.ResponseWriter, r *http.Request) {
+	if h.docker == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "docker monitoring disabled"})
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "container name required"})
+		return
+	}
+	err := h.docker.Restart(r.Context(), name)
+	if err != nil {
+		log.Printf("docker restart for %s: %v", name, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to restart container"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "container restarted"})
+}
+

@@ -485,3 +485,23 @@ func (m *Monitor) detect(now time.Time, items []Container) ([]Event, []string) {
 	sort.Strings(removed)
 	return evs, removed
 }
+
+// Logs fetches stdout/stderr logs from Docker for container name or ID
+func (m *Monitor) Logs(ctx context.Context, name string, tail int) (string, error) {
+	if tail <= 0 {
+		tail = 300
+	}
+	path := fmt.Sprintf("/containers/%s/logs?stdout=1&stderr=1&tail=%d&timestamps=1", name, tail)
+	raw, err := m.client.rawGet(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	return cleanDockerLogs(raw), nil
+}
+
+// Restart requests Docker Engine to restart the container
+func (m *Monitor) Restart(ctx context.Context, name string) error {
+	path := fmt.Sprintf("/containers/%s/restart?t=10", name)
+	return m.client.post(ctx, path)
+}
+

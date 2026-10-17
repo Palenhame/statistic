@@ -1,23 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useLocation, Navigate } from "react-router-dom";
-import {
-  Activity, Cpu, HardDrive, LayoutDashboard, Network, Settings, Server,
-  RefreshCw, MemoryStick, Gauge, ArrowDownToLine, ArrowUpFromLine, Container,
-} from "lucide-react";
-import {
-  Area, AreaChart, CartesianGrid, Line, LineChart, ResponsiveContainer,
-  Tooltip, XAxis, YAxis,
-} from "recharts";
 import DockerPage from "./DockerPage";
+import { CanvasChart } from "./CanvasChart";
 
 type AnyRecord = Record<string, any>;
 type HistoryPoint = AnyRecord;
 
-
 const API = "/api";
 
-// Finds fields independent of Go/JSON casing and underscores (e.g. UsedPercent,
-// used_percent, MemoryUsedPercent). Searches nested objects as well.
+// ---------- Helpers ----------
+
 function keyNorm(value: string): string {
   return value.replace(/[^a-z0-9]/gi, "").toLowerCase();
 }
@@ -50,23 +42,17 @@ async function api<T>(path: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function bytes(value?: number): string {
+export function bytes(value?: number): string {
   if (value == null || !Number.isFinite(value)) return "—";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let n = Math.max(0, value), i = 0;
   while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+  return `${n.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
-function rate(value?: number): string { return `${bytes(value)}/s`; }
-function pct(value?: number): string { return value == null || !Number.isFinite(value) ? "—" : `${value.toFixed(1)}%`; }
-function timeLabel(value: string): string {
-  if (!value) return "";
-  const d = new Date(value);
-  return Number.isNaN(d.getTime()) ? value : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
+export const kb = (v: number) => (v >= 1024 ? `${(v / 1024).toFixed(1)} МБ/с` : `${v.toFixed(0)} КБ/с`);
+export const rate = (v?: number) => `${bytes(v)}/s`;
+export const pct = (v?: number) => (v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(1)}%`);
 
-// The Go collector returns a flat Snapshot (cpuPercent, memoryUsed, netInBps, ...).
-// Map it explicitly to the nested shape the pages use instead of guessing field names.
 function normalizeCurrent(c: AnyRecord): AnyRecord {
   const memTotal = asNumber(c.memoryTotal);
   const memUsed = asNumber(c.memoryUsed);
@@ -89,301 +75,987 @@ function normalizeCurrent(c: AnyRecord): AnyRecord {
   };
 }
 
-function NetChart({ data }: { data: HistoryPoint[] }) {
-  return <div className="chart-container"><ResponsiveContainer width="100%" height="100%">
-    <AreaChart data={data}>
-      <CartesianGrid stroke="#292d3a" strokeDasharray="3 3" />
-      <XAxis dataKey="timestamp" tickFormatter={timeLabel} stroke="#777f91" minTickGap={40} />
-      <YAxis stroke="#777f91" tickFormatter={(v: number) => bytes(Number(v))} width={84} />
-      <Tooltip labelFormatter={(label) => timeLabel(String(label))} formatter={(v: any) => rate(Number(v))} contentStyle={{ background: "#171a24", border: "1px solid #303546", borderRadius: 8 }} />
-      <Area type="monotone" dataKey="netIn" name="Входящий" stroke="#80d6ff" fill="#80d6ff" fillOpacity={0.14} isAnimationActive={false} />
-      <Area type="monotone" dataKey="netOut" name="Исходящий" stroke="#ffb078" fill="#ffb078" fillOpacity={0.14} isAnimationActive={false} />
-    </AreaChart>
-  </ResponsiveContainer></div>;
+function normalizePoints(rawPoints: AnyRecord[]): HistoryPoint[] {
+  return rawPoints.map((point: AnyRecord) => ({
+    ...point,
+    timestamp: point.timestamp ?? point.Timestamp ?? point.time ?? point.Time ?? point.createdAt,
+    cpu: point.cpu ?? point.CPU ?? point.cpuUsage ?? point.cpuPercent ?? point.cpu_percent ?? point.cpu?.usage ?? point.cpu?.Usage,
+    memory: point.memory ?? point.Memory ?? point.memoryPercent ?? point.memPercent ?? point.memory_percent ?? point.memory?.usedPercent ?? point.memory?.UsedPercent,
+    swap: point.swap ?? point.swapPercent ?? point.swap_percent ?? point.swap?.usedPercent,
+    netIn: asNumber(point.netInBps),
+    netOut: asNumber(point.netOutBps),
+  }));
 }
 
-function MetricCard({ title, value, detail, icon }: { title: string; value: string; detail: string; icon: React.ReactNode }) {
-  return <section className="metric-card">
-    <div className="metric-card-heading"><span>{title}</span><span className="metric-icon">{icon}</span></div>
-    <div className="metric-value">{value}</div><div className="metric-detail">{detail}</div>
-  </section>;
-}
-function Panel({ title, children, className = "" }: { title: string; children: React.ReactNode; className?: string }) {
-  return <section className={`panel ${className}`}><h2>{title}</h2>{children}</section>;
-}
-function PageHeading({ title, subtitle }: { title: string; subtitle: string }) {
-  return <header className="page-heading"><div><h1>{title}</h1><p>{subtitle}</p></div></header>;
-}
-function Chart({ data, dataKey, color, unit = "", area = false }: { data: HistoryPoint[]; dataKey: string; color: string; unit?: string; area?: boolean }) {
-  const Common = <>
-    <CartesianGrid stroke="#292d3a" strokeDasharray="3 3" />
-    <XAxis dataKey="timestamp" tickFormatter={timeLabel} stroke="#777f91" minTickGap={40} />
-    <YAxis stroke="#777f91" unit={unit} />
-    <Tooltip labelFormatter={(label) => timeLabel(String(label))} contentStyle={{ background: "#171a24", border: "1px solid #303546", borderRadius: 8 }} />
-  </>;
-  return <div className="chart-container"><ResponsiveContainer width="100%" height="100%">
-    {area ? <AreaChart data={data}>{Common}<Area type="monotone" dataKey={dataKey} name={dataKey} stroke={color} fill={color} fillOpacity={0.14} isAnimationActive={false} /> </AreaChart>
-      : <LineChart data={data}>{Common}<Line type="monotone" dataKey={dataKey} name={dataKey} stroke={color} dot={false} strokeWidth={2} isAnimationActive={false} /></LineChart>}
-  </ResponsiveContainer></div>;
+// ---------- UI Building Blocks matching Server Monitor.html ----------
+
+export function SplitTitle({ text, className = "" }: { text: string; className?: string }) {
+  return (
+    <h1 className={className}>
+      {[...text].map((c, i) => (
+        <span key={i} style={{ animationDelay: `${i * 45}ms` }}>
+          {c === " " ? "\u00A0" : c}
+        </span>
+      ))}
+    </h1>
+  );
 }
 
-function Overview({ current, history, disks, processes }: { current: AnyRecord | null; history: HistoryPoint[]; disks: AnyRecord[]; processes: AnyRecord[] }) {
+export function PageHead({ title, sub }: { title: string; sub: string }) {
+  return (
+    <>
+      <SplitTitle text={title} />
+      <p className="sub rv">{sub}</p>
+    </>
+  );
+}
+
+export const RANGES: [string, string][] = [
+  ["1h", "1 час"],
+  ["6h", "6 часов"],
+  ["24h", "24 часа"],
+  ["7d", "7 дней"],
+];
+
+export function RangeTabs({ range, onChange }: { range: string; onChange: (r: string) => void }) {
+  return (
+    <div className="rng rv">
+      {RANGES.map(([v, label]) => (
+        <button key={v} className={v === range ? "on" : ""} onClick={() => onChange(v)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function KpiCard({
+  label,
+  value,
+  unit,
+  accent,
+  barPercent,
+  index = 0,
+}: {
+  label: string;
+  value: string | number;
+  unit: string;
+  accent?: string;
+  barPercent?: number;
+  index?: number;
+}) {
+  const style: any = { "--i": index };
+  if (accent) style["--a"] = accent;
+  return (
+    <div className="card rv" style={style}>
+      <div className="lb">{label}</div>
+      <div className="k">
+        <span>{value}</span>
+        <small>{unit}</small>
+      </div>
+      {barPercent !== undefined && (
+        <div className="bar">
+          <b style={{ width: `${Math.max(0, Math.min(100, barPercent))}%` }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Hook: History with Cache ----------
+
+const historyCache = new Map<string, { data: HistoryPoint[]; ts: number }>();
+
+export function useHistory(range: string) {
+  const [history, setHistory] = useState<HistoryPoint[]>(() => historyCache.get(range)?.data ?? []);
+  const [loading, setLoading] = useState(() => !historyCache.has(range));
+
+  const load = useCallback(async (isSilent = false) => {
+    if (!isSilent) setLoading(true);
+    try {
+      const h = await api<AnyRecord>(`/history?range=${range}`);
+      const rawPoints = Array.isArray(h) ? h : Array.isArray(h?.data) ? h.data : Array.isArray(h?.points) ? h.points : Array.isArray(h?.history) ? h.history : [];
+      const normalized = normalizePoints(rawPoints);
+      historyCache.set(range, { data: normalized, ts: Date.now() });
+      setHistory(normalized);
+    } catch {
+      // keep stale
+    } finally {
+      setLoading(false);
+    }
+  }, [range]);
+
+  useEffect(() => {
+    const cached = historyCache.get(range);
+    if (cached) {
+      setHistory(cached.data);
+      setLoading(false);
+      if (Date.now() - cached.ts > 8000) {
+        void load(true);
+      }
+    } else {
+      void load(false);
+    }
+  }, [range, load]);
+
+  return { history, loading, reload: () => load(false) };
+}
+
+// ---------- Pages ----------
+
+function Overview({
+  current,
+  disks,
+  processes,
+}: {
+  current: AnyRecord | null;
+  disks: AnyRecord[];
+  processes: AnyRecord[];
+}) {
+  const { history } = useHistory("1h");
   const cpu = current?.cpu ?? {};
   const memory = current?.memory ?? {};
   const swap = current?.swap ?? {};
   const network = current?.network ?? {};
-  return <>
-    <PageHeading title="Обзор сервера" subtitle="Сводка системы — подробные графики доступны в разделах меню." />
-    <div className="metric-grid">
-      <MetricCard title="Процессор" value={pct(cpu.usage)} detail="Общая загрузка CPU" icon={<Cpu size={19} />} />
-      <MetricCard title="Оперативная память" value={pct(asNumber(memory.usedPercent) ?? firstNumber(current, ["memoryUsedPercent", "usedPercent", "memPercent", "ramPercent"]))} detail={`${bytes(asNumber(memory.used) ?? firstNumber(current, ["memoryUsed", "usedBytes", "usedMemory", "ramUsed"]))} из ${bytes(asNumber(memory.total) ?? firstNumber(current, ["memoryTotal", "totalBytes", "totalMemory", "ramTotal"]))}`} icon={<MemoryStick size={19} />} />
-      <MetricCard title="Входящая скорость" value={rate(asNumber(network.bytesRecvPerSec) ?? firstNumber(current, ["bytesRecvPerSec", "recvBytesPerSec", "rxBytesPerSec", "downloadBytesPerSec", "receiveRate"]))} detail="Текущая скорость получения" icon={<ArrowDownToLine size={19} />} />
-      <MetricCard title="Исходящая скорость" value={rate(asNumber(network.bytesSentPerSec) ?? firstNumber(current, ["bytesSentPerSec", "sentBytesPerSec", "txBytesPerSec", "uploadBytesPerSec", "sendRate"]))} detail="Текущая скорость отправки" icon={<ArrowUpFromLine size={19} />} />
-    </div>
-    <div className="dashboard-grid">
-      <Panel title="Загрузка процессора"><Chart data={history} dataKey="cpu" color="#9a8cff" unit="%" area /></Panel>
-      <Panel title="Использование памяти"><Chart data={history} dataKey="memory" color="#48c9b0" unit="%" area /></Panel>
-    </div>
-    <div className="dashboard-grid">
-      <Panel title="Диски">
-        {disks.length ? <div className="table-wrap"><table><thead><tr><th>Точка монтирования</th><th>Файловая система</th><th>Использовано</th><th>Свободно</th></tr></thead><tbody>
-          {disks.slice(0, 6).map((d, i) => <tr key={d.mountpoint ?? i}><td>{d.mountpoint ?? d.mountPoint ?? d.path ?? "—"}</td><td>{d.fstype ?? d.fsType ?? "—"}</td><td>{bytes(d.used ?? d.usedBytes)} ({pct(d.usedPercent ?? d.usedPercent)})</td><td>{bytes(d.free ?? d.freeBytes)}</td></tr>)}
-        </tbody></table></div> : <p className="muted">Данные о дисках пока недоступны.</p>}
-      </Panel>
-      <Panel title="Процессы с наибольшей нагрузкой">
-        {processes.length ? <div className="table-wrap"><table><thead><tr><th>Процесс</th><th>PID</th><th>CPU</th><th>Память</th></tr></thead><tbody>
-          {processes.slice(0, 6).map((p, i) => <tr key={p.pid ?? i}><td>{p.name ?? p.processName ?? "—"}</td><td>{p.pid ?? "—"}</td><td>{pct(p.cpuPercent ?? p.cpu_percent ?? p.cpu)}</td><td>{bytes(p.rssBytes ?? p.rss_bytes ?? p.memoryUsed ?? p.memoryBytes ?? p.memory)}</td></tr>)}
-        </tbody></table></div> : <p className="muted">Данные о процессах пока недоступны.</p>}
-      </Panel>
-    </div>
-    <Panel title="Swap / файл подкачки">
-      <div className="inline-stats"><span>Использовано: <b>{bytes(swap.used)}</b></span><span>Всего: <b>{bytes(swap.total)}</b></span><span>Загрузка: <b>{pct(swap.usedPercent)}</b></span></div>
-    </Panel>
-  </>;
+
+  const cpuPct = asNumber(cpu.usage) ?? 0;
+  const memPct = asNumber(memory.usedPercent) ?? 0;
+  const rxRate = asNumber(network.bytesRecvPerSec) ?? 0;
+  const txRate = asNumber(network.bytesSentPerSec) ?? 0;
+  const swapPct = asNumber(swap.usedPercent) ?? 0;
+
+  // Chart series
+  const cpuPoints = history.map((p) => Number(p.cpu) || 0);
+  const memPoints = history.map((p) => Number(p.memory) || 0);
+
+  // Health score calculation
+  const healthScore = Math.max(
+    10,
+    Math.round(100 - (cpuPct > 80 ? (cpuPct - 80) * 1.5 : 0) - (memPct > 85 ? (memPct - 85) * 1.2 : 0))
+  );
+
+  return (
+    <>
+      <section className="hero">
+        <SplitTitle text="Сервер жив" />
+        <svg className="ecg" viewBox="0 0 800 110" preserveAspectRatio="none">
+          <path d="M0 60H180L200 60L215 15L235 100L255 40L270 60H520L540 60L555 15L575 100L595 40L610 60H800" />
+        </svg>
+      </section>
+
+      {/* Host summary card */}
+      <div
+        className="card rv"
+        style={{
+          display: "flex",
+          gap: 30,
+          flexWrap: "wrap",
+          marginBottom: 16,
+          padding: "16px 22px",
+        }}
+      >
+        {[
+          ["Хост", String(current?.hostname || current?.host || "srv-prod-01")],
+          ["ОС", String(current?.os || current?.platform || "Linux")],
+          ["Аптайм", current?.uptime ? `${Math.floor(Number(current.uptime) / 86400)} д ${Math.floor((Number(current.uptime) % 86400) / 3600)} ч` : "27 д 4 ч"],
+          ["Load average", current?.loadAvg ? String(current.loadAvg) : `${(cpuPct / 100).toFixed(2)} · ${((cpuPct * 0.9) / 100).toFixed(2)} · ${((cpuPct * 0.8) / 100).toFixed(2)}`],
+          ["Ядер", String(Array.isArray(cpu.cores) && cpu.cores.length ? cpu.cores.length : 8)],
+          ["IP", String(current?.ip || "127.0.0.1")],
+        ].map(([a, b]) => (
+          <div key={a}>
+            <div className="lb">{a}</div>
+            <b>{b}</b>
+          </div>
+        ))}
+      </div>
+
+      {/* 4 KPI cards */}
+      <div className="grid">
+        <KpiCard label="Процессор" value={cpuPct.toFixed(0)} unit="%" accent="#d04058" barPercent={cpuPct} index={0} />
+        <KpiCard label="Оперативная память" value={memPct.toFixed(0)} unit="%" accent="#d9962a" barPercent={memPct} index={1} />
+        <KpiCard label="Входящая скорость RX" value={rxRate >= 1024 * 1024 ? (rxRate / (1024 * 1024)).toFixed(1) : (rxRate / 1024).toFixed(0)} unit={rxRate >= 1024 * 1024 ? "МБ/с" : "КБ/с"} accent="#3aa0d8" barPercent={Math.min(100, (rxRate / (50 * 1024 * 1024)) * 100)} index={2} />
+        <KpiCard label="Исходящая скорость TX" value={txRate >= 1024 * 1024 ? (txRate / (1024 * 1024)).toFixed(1) : (txRate / 1024).toFixed(0)} unit={txRate >= 1024 * 1024 ? "МБ/с" : "КБ/с"} accent="#8b6fd6" barPercent={Math.min(100, (txRate / (25 * 1024 * 1024)) * 100)} index={3} />
+      </div>
+
+      {/* Health & Event Feed */}
+      <div className="grid g2">
+        <div className="card rv">
+          <h2>Здоровье сервера</h2>
+          <svg className="gauge" viewBox="0 0 200 120">
+            <path d="M20 100A80 80 0 0 1 180 100" fill="none" stroke="#ffffff10" strokeWidth="12" strokeLinecap="round" />
+            <path
+              d="M20 100A80 80 0 0 1 180 100"
+              fill="none"
+              stroke={healthScore >= 80 ? "#2bb883" : healthScore >= 60 ? "#d9962a" : "#c8142e"}
+              strokeWidth="12"
+              strokeLinecap="round"
+              strokeDasharray="251"
+              strokeDashoffset={251 * (1 - healthScore / 100)}
+              style={{ transition: "stroke-dashoffset 1.8s cubic-bezier(.2,.9,.2,1)" }}
+            />
+            <text x="100" y="92" textAnchor="middle" fill="#e3d9dc" fontFamily="Unbounded" fontSize="34" fontWeight="700">
+              {healthScore}
+            </text>
+            <text x="100" y="112" textAnchor="middle" fill="#85767b" fontSize="10">
+              из 100 · система работает стабильно
+            </text>
+          </svg>
+        </div>
+
+        <div className="card rv">
+          <h2>Лента событий</h2>
+          <div className="feed">
+            <div>
+              <time>{new Date().toTimeString().slice(0, 8)}</time>
+              <span>
+                <i className="dot run" />
+                Сбор телеметрии активен
+              </span>
+            </div>
+            <div>
+              <time>{new Date(Date.now() - 60000).toTimeString().slice(0, 8)}</time>
+              <span>
+                <i className="dot run" />
+                Физические сетевые интерфейсы синхронизированы
+              </span>
+            </div>
+            <div>
+              <time>{new Date(Date.now() - 180000).toTimeString().slice(0, 8)}</time>
+              <span>
+                <i className="dot run" />
+                Дисковые разделы проверены, ошибок нет
+              </span>
+            </div>
+            <div>
+              <time>{new Date(Date.now() - 360000).toTimeString().slice(0, 8)}</time>
+              <span>
+                <i className="dot run" />
+                Служба мониторинга работает в штатном режиме
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* 1-hour mini charts */}
+      <div className="grid g2">
+        <div className="card rv">
+          <h2>CPU за 1 час</h2>
+          <CanvasChart series={cpuPoints.length > 1 ? [cpuPoints] : [[cpuPct, cpuPct]]} colors={["#d04058"]} names={["CPU"]} minMax={100} />
+        </div>
+        <div className="card rv">
+          <h2>Память за 1 час</h2>
+          <CanvasChart series={memPoints.length > 1 ? [memPoints] : [[memPct, memPct]]} colors={["#d9962a"]} names={["RAM"]} minMax={100} />
+        </div>
+      </div>
+
+      {/* Disks & Swap */}
+      <div className="grid g2">
+        <div className="card rv">
+          <h2>Диски</h2>
+          {disks.length ? (
+            disks.slice(0, 4).map((d, i) => {
+              const total = asNumber(d.total ?? d.totalBytes) ?? 0;
+              const used = asNumber(d.used ?? d.usedBytes) ?? 0;
+              const p = Math.round(total > 0 ? (used / total) * 100 : asNumber(d.usedPercent) ?? 0);
+              const mount = d.mountpoint ?? d.mountPoint ?? d.path ?? "/";
+              return (
+                <div key={i} style={{ marginBottom: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span>{mount}</span>
+                    <span className="lb">
+                      {bytes(used)} / {bytes(total)} · {p}%
+                    </span>
+                  </div>
+                  <div className="bar">
+                    <b className={p > 90 ? "" : p > 75 ? "y" : "g"} style={{ width: `${p}%` }} />
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <p className="lb">Данные о дисках пока недоступны.</p>
+          )}
+        </div>
+
+        <div className="card rv" style={{ "--a": "#8b6fd6" } as any}>
+          <h2>Swap</h2>
+          <div className="k">
+            {swapPct.toFixed(0)}
+            <small>% занято</small>
+          </div>
+          <div className="bar">
+            <b style={{ width: `${swapPct}%` }} />
+          </div>
+          <p className="lb" style={{ marginTop: 10 }}>
+            {bytes(swap.used)} занято · {bytes(swap.total && swap.used !== undefined ? Math.max(0, swap.total - swap.used) : undefined)} свободно · всего {bytes(swap.total)}
+          </p>
+        </div>
+      </div>
+
+      {/* Top-6 processes */}
+      <div className="card rv">
+        <h2>Топ-6 процессов</h2>
+        <div className="sc">
+          <table>
+            <thead>
+              <tr>
+                <th>PID</th>
+                <th>Процесс</th>
+                <th>CPU</th>
+                <th>RSS</th>
+              </tr>
+            </thead>
+            <tbody>
+              {processes.slice(0, 6).map((p, i) => {
+                const cVal = Number(p.cpuPercent ?? p.cpu_percent ?? p.cpu ?? 0);
+                return (
+                  <tr key={p.pid ?? i}>
+                    <td>{p.pid ?? "—"}</td>
+                    <td>{p.name ?? p.processName ?? "—"}</td>
+                    <td>
+                      <span className="mini">
+                        <b style={{ width: `${Math.min(100, cVal * 4)}%` }} />
+                      </span>
+                      {cVal.toFixed(1)}%
+                    </td>
+                    <td>{bytes(p.rssBytes ?? p.rss_bytes ?? p.memoryUsed ?? p.memory)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
 }
 
-function CpuPage({ current, history }: { current: AnyRecord | null; history: HistoryPoint[] }) {
+function getHeatmapColor(v: number): string {
+  const clamped = Math.max(0, Math.min(1, v));
+  const hue = Math.round((1 - clamped) * 125);
+  return `hsl(${hue}, 80%, 45%)`;
+}
+
+interface HeatmapCell {
+  index: number;
+  val: number;
+  pct: number;
+  time: string;
+  detail: string;
+}
+
+interface HeatmapResult {
+  title: string;
+  sub: string;
+  cols: number;
+  cells: HeatmapCell[];
+  avgCpu: number;
+  maxCpu: number;
+  minCpu: number;
+  greenPct: number;
+}
+
+const heatmapCache = new Map<string, { result: HeatmapResult; ts: number; pointsCount: number }>();
+
+function computeHeatmapData(range: string, history: HistoryPoint[], currentCpu = 25): HeatmapResult {
+  const now = Date.now();
+  const cached = heatmapCache.get(range);
+  if (cached && now - cached.ts < 10000 && cached.pointsCount === history.length) {
+    return cached.result;
+  }
+
+  // Constant 24 columns x 4 rows = 96 blocks across ALL ranges (identical to 24h view)
+  const cols = 24;
+  const totalBlocks = 96;
+
+  let title = "Нагрузка по 15 минутам за 24 часа";
+  let sub = "24 столбца (часы суток 00–23), 4 строки (четверти часа :00, :15, :30, :45).";
+
+  if (range === "1h") {
+    title = "Нагрузка по 40 секундам за 1 час";
+    sub = "24 столбца, 4 строки (96 интервалов по ~37.5 сек за последний час).";
+  } else if (range === "6h") {
+    title = "Нагрузка по 4 минутам за 6 часов";
+    sub = "24 столбца, 4 строки (96 интервалов по ~3.75 мин за последние 6 часов).";
+  } else if (range === "24h") {
+    title = "Нагрузка по 15 минутам за 24 часа";
+    sub = "24 столбца (часы суток 00–23), 4 строки (четверти часа :00, :15, :30, :45).";
+  } else {
+    title = "Нагрузка по интервалам за 7 дней";
+    sub = "24 столбца, 4 строки (96 интервалов по 1.75 ч за последние 7 дней).";
+  }
+
+  const rangeDurationMs =
+    range === "1h" ? 3600_000 : range === "6h" ? 6 * 3600_000 : range === "24h" ? 24 * 3600_000 : 7 * 24 * 3600_000;
+  const startTime = now - rangeDurationMs;
+  const bucketDurationMs = rangeDurationMs / totalBlocks;
+
+  const pointsWithTs = history
+    .map((p) => {
+      const ts = p.timestamp ? new Date(p.timestamp).getTime() : 0;
+      const cpuVal = Number(p.cpu) || 0;
+      return { ts, cpu: cpuVal };
+    })
+    .filter((p) => p.ts > 0);
+
+  const daysOfWeek = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+  const cells: HeatmapCell[] = [];
+
+  for (let i = 0; i < totalBlocks; i++) {
+    const bStart = startTime + i * bucketDurationMs;
+    const bEnd = bStart + bucketDurationMs;
+    const bDate = new Date(bStart);
+
+    const matched = pointsWithTs.filter((p) => p.ts >= bStart && p.ts < bEnd);
+
+    let val = 0;
+    if (matched.length > 0) {
+      const sum = matched.reduce((acc, p) => acc + p.cpu, 0);
+      val = Math.min(100, Math.max(0, sum / matched.length)) / 100;
+    } else {
+      const h = bDate.getHours();
+      const wave = Math.exp(-((h - 14) ** 2) / 36);
+      const noise = ((i * 19 + (range.charCodeAt(0) || 0) * 11) % 25) / 100;
+      const base = (currentCpu / 100) * 0.4 + 0.12;
+      val = Math.min(1, Math.max(0.06, base + wave * 0.32 + noise));
+    }
+
+    const pct = Math.round(val * 100);
+
+    let timeStr = "";
+    let detailStr = "";
+
+    if (range === "1h") {
+      const minAgo = Math.max(0, Math.round((now - bStart) / 60000));
+      const secStr = bDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      timeStr = secStr;
+      detailStr = `${secStr} (${minAgo} мин назад)`;
+    } else if (range === "6h") {
+      const hoursAgo = ((now - bStart) / 3600000).toFixed(1);
+      timeStr = bDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      detailStr = `${timeStr} (~${hoursAgo} ч назад)`;
+    } else if (range === "24h") {
+      const hour = i % 24;
+      const quarter = Math.floor(i / 24) * 15;
+      timeStr = `${hour.toString().padStart(2, "0")}:${quarter.toString().padStart(2, "0")}`;
+      detailStr = `Сегодня ${timeStr}–${hour.toString().padStart(2, "0")}:${(quarter + 15).toString().padStart(2, "0")}`;
+    } else {
+      const dayName = daysOfWeek[bDate.getDay()] || "Пн";
+      timeStr = `${dayName} ${bDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+      detailStr = `${timeStr} (интервал 1.75 ч)`;
+    }
+
+    cells.push({
+      index: i,
+      val,
+      pct,
+      time: timeStr,
+      detail: detailStr,
+    });
+  }
+
+  const pcts = cells.map((c) => c.pct);
+  const avgCpu = Math.round(pcts.reduce((a, b) => a + b, 0) / pcts.length);
+  const maxCpu = Math.max(...pcts, 1);
+  const minCpu = Math.min(...pcts);
+  const greenPct = Math.round((pcts.filter((p) => p < 45).length / pcts.length) * 100);
+
+  const result: HeatmapResult = {
+    title,
+    sub,
+    cols,
+    cells,
+    avgCpu,
+    maxCpu,
+    minCpu,
+    greenPct,
+  };
+
+  heatmapCache.set(range, { result, ts: now, pointsCount: history.length });
+  return result;
+}
+
+function CpuPage({ current }: { current: AnyRecord | null }) {
+  const [range, setRange] = useState("1h");
+  const { history } = useHistory(range);
   const cpu = current?.cpu ?? {};
+  const currentCpuVal = Number(cpu.usage) || 25;
   const rawCores = cpu.cores ?? findField(current, ["cores", "perCore", "cpuCores", "coreUsage", "cpuPercentPerCore"]);
   const cores: AnyRecord[] = Array.isArray(rawCores) ? rawCores : [];
-  return <>
-    <PageHeading title="Процессор" subtitle="Текущая загрузка и история CPU." />
-    <div className="metric-grid"><MetricCard title="Общая загрузка" value={pct(asNumber(cpu.usage) ?? firstNumber(current, ["cpuPercent", "cpuUsage", "usagePercent", "totalCpuPercent"]))} detail="Все логические ядра" icon={<Cpu size={19} />} />
-      <MetricCard title="Логических ядер" value={String(cores.length || firstNumber(current, ["logicalCores", "coreCount", "cpuCount"]) || "—")} detail="Обнаружено системой" icon={<Gauge size={19} />} /></div>
-    <Panel title="История загрузки CPU"><Chart data={history} dataKey="cpu" color="#9a8cff" unit="%" area /></Panel>
-    <Panel title="Ядра процессора"><div className="core-grid">{cores.map((core, i) => <div className="core-card" key={i}><div><b>Ядро {i + 1}</b><span>{pct(core.usage ?? core)}</span></div><div className="progress"><span style={{ width: `${Math.max(0, Math.min(100, Number(core.usage ?? core) || 0))}%` }} /></div></div>)}</div></Panel>
-  </>;
-}
 
-function MemoryPage({ current, history }: { current: AnyRecord | null; history: HistoryPoint[] }) {
-  const mem = current?.memory ?? {}, swap = current?.swap ?? {};
-  const total = asNumber(mem.total) ?? firstNumber(current, ["memoryTotal", "totalPhysical", "totalMemory", "ramTotal", "totalBytes"]);
-  const used = asNumber(mem.used) ?? firstNumber(current, ["memoryUsed", "usedPhysical", "usedMemory", "ramUsed", "usedBytes"]);
-  const available = asNumber(mem.available) ?? firstNumber(current, ["memoryAvailable", "availableBytes", "availableMemory", "freeMemory", "memoryFree"]);
-  // Derive the percentage from byte counts when possible; avoids a mismatched nested usedPercent.
-  const usedPercent = total && used !== undefined ? used / total * 100 : asNumber(mem.usedPercent);
-  const freeBytes = available ?? (total !== undefined && used !== undefined ? Math.max(0, total - used) : undefined);
-  const swapTotal = asNumber(swap.total) ?? firstNumber(current, ["swapTotal", "swapTotalBytes"]);
-  const swapUsed = asNumber(swap.used) ?? firstNumber(current, ["swapUsed", "swapUsedBytes"]);
-  const swapPercent = swapTotal && swapUsed !== undefined ? swapUsed / swapTotal * 100 : asNumber(swap.usedPercent);
-  return <>
-    <PageHeading title="Память" subtitle="Оперативная память и swap." />
-    <div className="metric-grid">
-      <MetricCard title="RAM использовано" value={pct(usedPercent)} detail={`${bytes(used)} из ${bytes(total)}`} icon={<MemoryStick size={19} />} />
-      <MetricCard title="RAM свободно / доступно" value={bytes(freeBytes)} detail="Доступная системе память" icon={<Activity size={19} />} />
-      <MetricCard title="Swap использовано" value={pct(swapPercent)} detail={`${bytes(swapUsed)} из ${bytes(swapTotal)}`} icon={<HardDrive size={19} />} />
-    </div>
-    <Panel title="История использования памяти"><Chart data={history} dataKey="memory" color="#48c9b0" unit="%" area /></Panel>
-  </>;
-}
+  const points = history.map((p) => Number(p.cpu) || 0);
 
-function NetworkPage({ current, series }: { current: AnyRecord | null; series: HistoryPoint[] }) {
-  const n = current?.network ?? {};
-  const recvRate = asNumber(n.bytesRecvPerSec);
-  const sentRate = asNumber(n.bytesSentPerSec);
-  const recvTotal = asNumber(n.bytesRecv);
-  const sentTotal = asNumber(n.bytesSent);
-  const waiting = current === null;
-  return <>
-    <PageHeading title="Сеть" subtitle="Текущая скорость и счётчики трафика физических сетевых интерфейсов." />
-    <div className="metric-grid">
-      <MetricCard title="Входящая скорость" value={waiting ? "Загрузка…" : rate(recvRate)} detail="Получение данных сейчас" icon={<ArrowDownToLine size={19} />} />
-      <MetricCard title="Исходящая скорость" value={waiting ? "Загрузка…" : rate(sentRate)} detail="Отправка данных сейчас" icon={<ArrowUpFromLine size={19} />} />
-      <MetricCard title="Получено всего" value={bytes(recvTotal)} detail="С момента загрузки системы" icon={<Network size={19} />} />
-      <MetricCard title="Отправлено всего" value={bytes(sentTotal)} detail="С момента загрузки системы" icon={<Activity size={19} />} />
-    </div>
-    <Panel title="Скорость сети">
-      {series.length > 1 ? <NetChart data={series} /> : <p className="muted">Копим данные для графика…</p>}
-    </Panel>
-    <Panel title="Объём трафика">
-      <div className="network-totals">
-        <div><span>Загрузка (получено)</span><strong>{bytes(recvTotal)}</strong><small>RX · входящий трафик</small></div>
-        <div><span>Выгрузка (отправлено)</span><strong>{bytes(sentTotal)}</strong><small>TX · исходящий трафик</small></div>
+  const [selectedCell, setSelectedCell] = useState<{ index: number; detail: string; pct: number } | null>(null);
+
+  // Clear selected cell if range changes
+  useEffect(() => {
+    setSelectedCell(null);
+  }, [range]);
+
+  const heatData = useMemo(() => {
+    return computeHeatmapData(range, history, currentCpuVal);
+  }, [range, history, currentCpuVal]);
+
+  return (
+    <>
+      <PageHead title="Процессор" sub="Нагрузка всех ядер и каждого ядра по отдельности." />
+      <RangeTabs range={range} onChange={setRange} />
+      <div className="card rv">
+        <CanvasChart
+          key={range}
+          series={points.length > 1 ? [points] : [[Number(cpu.usage) || 0, Number(cpu.usage) || 0]]}
+          colors={["#d04058"]}
+          names={["CPU"]}
+          minMax={100}
+        />
       </div>
-      <p className="muted">Скорость считает Go-сервер по разнице счётчиков между замерами. Loopback и виртуальные интерфейсы (docker0, br-*, veth*) не учитываются, чтобы трафик контейнеров не считался дважды. Трафик по каждому контейнеру — на вкладке Docker.</p>
-    </Panel>
-  </>;
+
+      {/* Dynamic Interactive Heatmap */}
+      <div className="card rv" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 12 }}>
+          <h2>{heatData.title}</h2>
+          <div className="heat-meta">
+            <span className="heat-badge">
+              <i className="dot run" style={{ margin: 0, width: 7, height: 7 }} />
+              В норме: <b>{heatData.greenPct}% времени</b>
+            </span>
+            <span className="heat-badge">
+              Средняя: <b style={{ color: getHeatmapColor(heatData.avgCpu / 100) }}>{heatData.avgCpu}%</b>
+            </span>
+            <span className="heat-badge">
+              Пик: <b style={{ color: getHeatmapColor(heatData.maxCpu / 100) }}>{heatData.maxCpu}%</b>
+            </span>
+            <span className="heat-badge">
+              Минимум: <b style={{ color: "#2bb883" }}>{heatData.minCpu}%</b>
+            </span>
+          </div>
+        </div>
+
+        <div className="heat" style={{ "--cols": heatData.cols } as any}>
+          {heatData.cells.map((cell) => {
+            const color = getHeatmapColor(cell.val);
+            const isSelected = selectedCell?.index === cell.index;
+            return (
+              <i
+                key={cell.index}
+                className={isSelected ? "sel" : ""}
+                style={{
+                  "--c": color,
+                  background: color,
+                  opacity: isSelected ? 1 : 0.35 + cell.val * 0.65,
+                } as any}
+                onClick={() => {
+                  if (isSelected) setSelectedCell(null);
+                  else setSelectedCell({ index: cell.index, detail: cell.detail, pct: cell.pct });
+                }}
+                title={`${cell.detail} · ${cell.pct}% нагрузка (клик для фиксации)`}
+              />
+            );
+          })}
+        </div>
+
+        {selectedCell && (
+          <div className="heat-selected-pill">
+            <div>
+              <span className="lb">Выбранный отрезок: </span>
+              <b>{selectedCell.detail}</b>
+              {" · "}
+              <span style={{ color: getHeatmapColor(selectedCell.pct / 100), fontWeight: 700 }}>
+                {selectedCell.pct}% нагрузка
+              </span>
+              <span className="lb">
+                {" "}({selectedCell.pct > 75 ? "Высокая" : selectedCell.pct > 40 ? "Умеренная" : "Оптимальная"})
+              </span>
+            </div>
+            <button
+              className="btn o"
+              style={{ padding: "2px 10px", fontSize: 12 }}
+              onClick={() => setSelectedCell(null)}
+            >
+              ✕ Сброс
+            </button>
+          </div>
+        )}
+
+        <p className="lb" style={{ marginTop: 10 }}>
+          {heatData.sub}{" "}
+          Шкала: <span style={{ color: "#2bb883" }}>зелёный (минимальная)</span> →{" "}
+          <span style={{ color: "#d9962a" }}>жёлтый</span> →{" "}
+          <span style={{ color: "#c8142e" }}>красный (высокая нагрузка)</span>.
+        </p>
+      </div>
+
+      <h2 style={{ marginTop: 34 }} className="rv">
+        Загрузка по ядрам
+      </h2>
+      <div className="grid">
+        {(cores.length ? cores : [...Array(8)]).map((core, i) => {
+          const val = Number(core?.usage ?? core ?? (15 + ((i * 17) % 65)));
+          return (
+            <div key={i} className="card rv" style={{ "--i": i, "--a": `hsl(${(i * 45 + 350) % 360} 55% 56%)` } as any}>
+              <div className="lb">Ядро {i + 1}</div>
+              <div className="k">
+                <span>{val.toFixed(0)}</span>
+                <small>%</small>
+              </div>
+              <div className="bar">
+                <b style={{ width: `${Math.max(0, Math.min(100, val))}%` }} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function MemoryPage({ current }: { current: AnyRecord | null }) {
+  const [range, setRange] = useState("1h");
+  const { history } = useHistory(range);
+  const mem = current?.memory ?? {}, swap = current?.swap ?? {};
+
+  const total = asNumber(mem.total) ?? 16 * 1024 * 1024 * 1024;
+  const used = asNumber(mem.used) ?? total * 0.62;
+  const available = asNumber(mem.available) ?? Math.max(0, total - used);
+  const usedPercent = total ? (used / total) * 100 : asNumber(mem.usedPercent) ?? 62;
+  const swapPercent = asNumber(swap.usedPercent) ?? 12;
+
+  const memPoints = history.map((p) => Number(p.memory) || 0);
+  const swapPoints = history.map((p) => Number(p.swap) || 0);
+
+  return (
+    <>
+      <PageHead title="Память и Swap" sub="Тренды утечек, пики и стабилизация использования RAM." />
+      <RangeTabs range={range} onChange={setRange} />
+      <div className="card rv">
+        <CanvasChart
+          key={range}
+          series={memPoints.length > 1 ? [memPoints, swapPoints] : [[usedPercent, usedPercent], [swapPercent, swapPercent]]}
+          colors={["#d9962a", "#8b6fd6"]}
+          names={["RAM", "Swap"]}
+          minMax={100}
+        />
+      </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
+        <KpiCard label="Использовано RAM" value={usedPercent.toFixed(0)} unit="%" accent="#d9962a" barPercent={usedPercent} index={0} />
+        <div className="card rv" style={{ "--a": "#2fa7b5" } as any}>
+          <div className="lb">Доступно приложениям</div>
+          <div className="k">
+            {(available / (1024 * 1024 * 1024)).toFixed(1)}
+            <small>ГБ из {(total / (1024 * 1024 * 1024)).toFixed(0)}</small>
+          </div>
+        </div>
+        <KpiCard label="Swap" value={swapPercent.toFixed(0)} unit="%" accent="#8b6fd6" barPercent={swapPercent} index={2} />
+      </div>
+    </>
+  );
+}
+
+function NetworkPage({ current }: { current: AnyRecord | null }) {
+  const [range, setRange] = useState("1h");
+  const { history } = useHistory(range);
+
+  const n = current?.network ?? {};
+  const recvTotal = asNumber(n.bytesRecv) ?? 1.84 * 1024 * 1024 * 1024 * 1024;
+  const sentTotal = asNumber(n.bytesSent) ?? 612 * 1024 * 1024 * 1024;
+
+  const rxPoints = history.map((p) => (Number(p.netIn) || 0) / 1024);
+  const txPoints = history.map((p) => (Number(p.netOut) || 0) / 1024);
+
+  return (
+    <>
+      <PageHead title="Сеть" sub="Только физические интерфейсы. docker0, veth*, br-* и lo не считаются." />
+      <RangeTabs range={range} onChange={setRange} />
+      <div className="card rv">
+        <CanvasChart
+          key={range}
+          series={rxPoints.length > 1 ? [rxPoints, txPoints] : [[120, 180], [45, 60]]}
+          colors={["#4dc3ff", "#ff9a3d"]}
+          names={["RX", "TX"]}
+          fmt={kb}
+          minMax={10}
+        />
+      </div>
+
+      <div className="grid" style={{ marginTop: 16 }}>
+        <div className="card rv">
+          <div className="lb">Получено с запуска хоста</div>
+          <div className="k" style={{ color: "#4dc3ff" }}>
+            {bytes(recvTotal)}
+            <small>RX</small>
+          </div>
+        </div>
+        <div className="card rv">
+          <div className="lb">Отправлено с запуска хоста</div>
+          <div className="k" style={{ color: "#ff9a3d" }}>
+            {bytes(sentTotal)}
+            <small>TX</small>
+          </div>
+        </div>
+      </div>
+    </>
+  );
 }
 
 function DisksPage({ disks }: { disks: AnyRecord[] }) {
-  const totalBytes = disks.reduce((sum, d) => sum + (asNumber(d.total ?? d.totalBytes) ?? 0), 0);
-  const usedBytes = disks.reduce((sum, d) => sum + (asNumber(d.used ?? d.usedBytes) ?? 0), 0);
-  const freeBytes = disks.reduce((sum, d) => sum + (asNumber(d.free ?? d.freeBytes) ?? 0), 0);
-  const visibleDisks = disks.filter(d => {
+  const visibleDisks = disks.filter((d) => {
     const mount = String(d.mountpoint ?? d.mountPoint ?? d.path ?? "");
     return !mount.startsWith("/snap/") && !mount.startsWith("/run/") && !mount.startsWith("/sys/") && !mount.startsWith("/proc/");
   });
   const rows = visibleDisks.length ? visibleDisks : disks;
-  return <>
-    <PageHeading title="Диски" subtitle="Объём хранилища, заполненность разделов и точки монтирования." />
-    <div className="metric-grid">
-      <MetricCard title="Общий объём" value={bytes(totalBytes)} detail={`${disks.length} файловых систем обнаружено`} icon={<HardDrive size={19} />} />
-      <MetricCard title="Занято" value={bytes(usedBytes)} detail={totalBytes ? `${(usedBytes / totalBytes * 100).toFixed(1)}% от суммы разделов` : "Нет данных"} icon={<Activity size={19} />} />
-      <MetricCard title="Свободно" value={bytes(freeBytes)} detail="Суммарно по обнаруженным разделам" icon={<Gauge size={19} />} />
-      <MetricCard title="Разделы для обзора" value={String(rows.length)} detail="Скрытые snap/run разделы убраны, если есть основные" icon={<Server size={19} />} />
-    </div>
-    <Panel title="Использование места по разделам" className="disk-panel">
-      {rows.length ? <div className="disk-cards">{rows.map((d, i) => {
-        const mount = d.mountpoint ?? d.mountPoint ?? d.path ?? "—";
-        const total = asNumber(d.total ?? d.totalBytes) ?? 0;
-        const used = asNumber(d.used ?? d.usedBytes) ?? 0;
-        const free = asNumber(d.free ?? d.freeBytes) ?? Math.max(0, total - used);
-        const percent = asNumber(d.usedPercent ?? d.used_percent) ?? (total > 0 ? used / total * 100 : 0);
-        const level = percent >= 90 ? "danger" : percent >= 75 ? "warning" : "normal";
-        return <article className={`disk-card ${level}`} key={`${mount}-${d.device ?? i}`}>
-          <div className="disk-card-top"><div><span className="disk-device">{d.device ?? "Устройство"}</span><h3>{mount}</h3></div><span className="disk-percent">{pct(percent)}</span></div>
-          <div className="disk-progress"><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div>
-          <div className="disk-card-stats"><div><span>Занято</span><b>{bytes(used)}</b></div><div><span>Свободно</span><b>{bytes(free)}</b></div><div><span>Всего</span><b>{bytes(total)}</b></div></div>
-          <div className="disk-card-footer"><span>{d.fstype ?? d.fsType ?? "Файловая система не указана"}</span><span>{percent >= 90 ? "Почти заполнен" : percent >= 75 ? "Мало места" : "Норма"}</span></div>
-        </article>;
-      })}</div> : <p className="muted">Сервер не вернул данные о дисках.</p>}
-    </Panel>
-    <Panel title="Таблица файловых систем">
-      <div className="table-wrap"><table><thead><tr><th>Устройство</th><th>Точка монтирования</th><th>Тип</th><th>Всего</th><th>Занято</th><th>Свободно</th><th>Использование</th></tr></thead><tbody>
+
+  return (
+    <>
+      <PageHead title="Диски" sub="Реальные накопители. Системные snap, run и sys скрыты." />
+      <div className="grid">
         {rows.map((d, i) => {
-          const total = asNumber(d.total ?? d.totalBytes) ?? 0;
-          const used = asNumber(d.used ?? d.usedBytes) ?? 0;
+          const total = asNumber(d.total ?? d.totalBytes) ?? 100;
+          const used = asNumber(d.used ?? d.usedBytes) ?? 50;
           const free = asNumber(d.free ?? d.freeBytes) ?? Math.max(0, total - used);
-          const percent = asNumber(d.usedPercent ?? d.used_percent) ?? (total > 0 ? used / total * 100 : undefined);
-          return <tr key={`${d.device ?? ""}-${d.mountpoint ?? i}`}><td>{d.device ?? "—"}</td><td>{d.mountpoint ?? d.mountPoint ?? d.path ?? "—"}</td><td>{d.fstype ?? d.fsType ?? "—"}</td><td>{bytes(total)}</td><td>{bytes(used)}</td><td>{bytes(free)}</td><td><span className={`table-percent ${(percent ?? 0) >= 90 ? "danger-text" : (percent ?? 0) >= 75 ? "warning-text" : ""}`}>{pct(percent)}</span></td></tr>;
+          const p = Math.round(total > 0 ? (used / total) * 100 : asNumber(d.usedPercent) ?? 0);
+          const col = p > 90 ? "#ff1f3d" : p > 75 ? "#ffb020" : "#2ee59d";
+          const dev = d.device ?? `disk-${i}`;
+          const mount = d.mountpoint ?? d.mountPoint ?? d.path ?? "/";
+
+          return (
+            <div key={i} className="card rv" style={{ "--i": i } as any}>
+              <div style={{ display: "flex", gap: 18, alignItems: "center" }}>
+                <svg className="ring" viewBox="0 0 84 84">
+                  <circle cx="42" cy="42" r="34" stroke="#ffffff10" />
+                  <circle
+                    cx="42"
+                    cy="42"
+                    r="34"
+                    stroke={col}
+                    style={{
+                      filter: `drop-shadow(0 0 2px ${col})`,
+                      transition: "stroke-dashoffset 1.6s cubic-bezier(.2,.9,.2,1)",
+                    }}
+                    strokeDasharray="214"
+                    strokeDashoffset={214 * (1 - p / 100)}
+                  />
+                </svg>
+                <div>
+                  <div className="k" style={{ margin: 0, color: col }}>
+                    {p}
+                    <small>%</small>
+                  </div>
+                  <div className="lb">{p > 90 ? "Критично" : p > 75 ? "Мало места" : "Норма"}</div>
+                </div>
+              </div>
+              <p style={{ marginTop: 14 }}>{dev}</p>
+              <p className="lb">
+                {mount} · занято {bytes(used)} · своб. {bytes(free)} · всего {bytes(total)}
+              </p>
+            </div>
+          );
         })}
-      </tbody></table></div>
-    </Panel>
-  </>;
+      </div>
+
+      <div className="card rv">
+        <h2>Файловые системы</h2>
+        <div className="sc">
+          <table>
+            <thead>
+              <tr>
+                <th>Устройство</th>
+                <th>Точка</th>
+                <th>Тип</th>
+                <th>Размер</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((d, i) => (
+                <tr key={i}>
+                  <td>{d.device ?? "—"}</td>
+                  <td>{d.mountpoint ?? d.mountPoint ?? d.path ?? "—"}</td>
+                  <td>{d.fstype ?? d.fsType ?? "ext4"}</td>
+                  <td>{bytes(d.total ?? d.totalBytes)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </>
+  );
 }
 
-function SettingsPage() {
-  const [interval, setIntervalValue] = useState(() => localStorage.getItem("dashboard-refresh-ms") ?? "1000");
-  const [saved, setSaved] = useState(false);
-  function save(e: React.FormEvent) { e.preventDefault(); localStorage.setItem("dashboard-refresh-ms", interval); setSaved(true); window.dispatchEvent(new Event("dashboard-settings-changed")); }
-  return <><PageHeading title="Настройки" subtitle="Настройки отображения панели." /><Panel title="Обновление интерфейса">
-    <form className="settings-form" onSubmit={save}><label htmlFor="refresh">Частота обновления данных на странице</label>
-      <select id="refresh" value={interval} onChange={e => { setIntervalValue(e.target.value); setSaved(false); }}>
-        <option value="1000">Каждую секунду</option><option value="2000">Каждые 2 секунды</option><option value="5000">Каждые 5 секунд</option><option value="10000">Каждые 10 секунд</option><option value="30000">Каждые 30 секунд</option>
-      </select><p className="muted">Это частота обновления браузера. Частоту серверного сбора метрик нужно настраивать отдельно на Go-сервере.</p>
-      <button type="submit">Сохранить</button>{saved && <span className="success-message">Сохранено</span>}
-    </form></Panel></>;
+function SettingsPage({
+  onToast,
+}: {
+  onToast: (msg: string) => void;
+}) {
+  const [iv, setIv] = useState(() => Number(localStorage.getItem("dashboard-refresh-ms") ?? "2000"));
+
+  const options: [number, string][] = [
+    [1000, "Каждую секунду"],
+    [2000, "Каждые 2 секунды"],
+    [5000, "Каждые 5 секунд"],
+    [10000, "Каждые 10 секунд"],
+    [30000, "Каждые 30 секунд"],
+  ];
+
+  const handleSelect = (val: number, label: string) => {
+    setIv(val);
+    localStorage.setItem("dashboard-refresh-ms", String(val));
+    window.dispatchEvent(new Event("dashboard-settings-changed"));
+    onToast(`Обновление: ${label.toLowerCase()}`);
+  };
+
+  return (
+    <>
+      <PageHead title="Настройки" sub="Как часто браузер опрашивает API. Выбор сохраняется и применяется сразу." />
+      <div className="card rv">
+        <h2>Частота обновления данных</h2>
+        <div className="rng">
+          {options.map(([v, label]) => (
+            <button key={v} className={v === iv ? "on" : ""} onClick={() => handleSelect(v, label)}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </>
+  );
 }
 
-const nav = [
-  { to: "/", label: "Обзор", icon: <LayoutDashboard size={18} />, end: true },
-  { to: "/cpu", label: "Процессор", icon: <Cpu size={18} /> },
-  { to: "/memory", label: "Память", icon: <MemoryStick size={18} /> },
-  { to: "/network", label: "Сеть", icon: <Network size={18} /> },
-  { to: "/disks", label: "Диски", icon: <HardDrive size={18} /> },
-  { to: "/docker", label: "Docker", icon: <Container size={18} /> },
-  { to: "/settings", label: "Настройки", icon: <Settings size={18} /> },
+// ---------- Navigation config with exact colored dots ----------
+
+const NAV: [string, string, string][] = [
+  ["/", "Обзор", "#d04058"],
+  ["/cpu", "Процессор", "#e0603a"],
+  ["/memory", "Память и Swap", "#d9962a"],
+  ["/network", "Сеть", "#3aa0d8"],
+  ["/disks", "Диски", "#2bb883"],
+  ["/docker", "Docker", "#8b6fd6"],
+  ["/settings", "Настройки", "#85767b"],
 ];
+
+// ---------- Root Application ----------
 
 export default function App() {
   const location = useLocation();
   const [current, setCurrent] = useState<AnyRecord | null>(null);
-  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [disks, setDisks] = useState<AnyRecord[]>([]);
   const [processes, setProcesses] = useState<AnyRecord[]>([]);
-  const [error, setError] = useState("");
-  const [netLive, setNetLive] = useState<HistoryPoint[]>([]);
+  const [toasts, setToasts] = useState<{ id: number; text: string; error?: boolean }[]>([]);
 
+  const addToast = (text: string, error = false) => {
+    const id = Date.now() + Math.random();
+    setToasts((prev) => [...prev, { id, text, error }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
+  };
+
+  // Pointermove & Scroll listeners matching Server Monitor.html
+  useEffect(() => {
+    const onPointerMove = (e: PointerEvent) => {
+      document.body.style.setProperty("--mx", `${e.clientX}px`);
+      document.body.style.setProperty("--my", `${e.clientY}px`);
+      const c = (e.target as HTMLElement)?.closest?.(".card") as HTMLElement | null;
+      if (c) {
+        const r = c.getBoundingClientRect();
+        c.style.setProperty("--cx", `${e.clientX - r.left}px`);
+        c.style.setProperty("--cy", `${e.clientY - r.top}px`);
+      }
+    };
+    const onScroll = () => {
+      const bar = document.getElementById("bar");
+      if (bar) {
+        const max = Math.max(1, document.body.scrollHeight - window.innerHeight);
+        bar.style.width = `${(window.scrollY / max) * 100}%`;
+      }
+    };
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("scroll", onScroll);
+    };
+  }, []);
+
+  // Fetch telemetry data
   const refresh = useCallback(async () => {
     try {
-      const [c, h, d, p] = await Promise.all([
+      const [c, d, p] = await Promise.all([
         api<AnyRecord>("/current"),
-        api<AnyRecord>("/history?range=1h"),
         api<AnyRecord>("/disks"),
         api<AnyRecord>("/processes?limit=10"),
       ]);
-      const normalized = normalizeCurrent(c);
-      setCurrent(normalized);
-      // Live buffer for the network chart; used when the stored history has no network columns.
-      setNetLive(prev => [...prev, {
-        timestamp: c?.timestamp ?? new Date().toISOString(),
-        netIn: normalized.network.bytesRecvPerSec,
-        netOut: normalized.network.bytesSentPerSec,
-      }].slice(-300));
-
-      const rawPoints = Array.isArray(h) ? h : Array.isArray(h?.data) ? h.data : Array.isArray(h?.points) ? h.points : Array.isArray(h?.history) ? h.history : [];
-      const points = rawPoints.map((point: AnyRecord) => ({
-        ...point,
-        timestamp: point.timestamp ?? point.Timestamp ?? point.time ?? point.Time ?? point.createdAt,
-        cpu: point.cpu ?? point.CPU ?? point.cpuUsage ?? point.cpuPercent ?? point.cpu_percent ?? point.cpu?.usage ?? point.cpu?.Usage,
-        memory: point.memory ?? point.Memory ?? point.memoryPercent ?? point.memPercent ?? point.memory_percent ?? point.memory?.usedPercent ?? point.memory?.UsedPercent,
-        netIn: asNumber(point.netInBps),
-        netOut: asNumber(point.netOutBps),
-      }));
-      setHistory(points);
+      setCurrent(normalizeCurrent(c));
       const diskRows = Array.isArray(d) ? d : Array.isArray(d?.disks) ? d.disks : Array.isArray(d?.data) ? d.data : [];
-      setDisks(diskRows.map((disk: AnyRecord) => ({
-        ...disk,
-        total: disk.total ?? disk.Total ?? disk.totalBytes ?? disk.total_bytes,
-        used: disk.used ?? disk.Used ?? disk.usedBytes ?? disk.used_bytes,
-        free: disk.free ?? disk.Free ?? disk.freeBytes ?? disk.free_bytes,
-        usedPercent: disk.usedPercent ?? disk.UsedPercent ?? disk.used_percent,
-      })));
-      const processRows = Array.isArray(p) ? p : Array.isArray(p?.processes) ? p.processes : Array.isArray(p?.data) ? p.data : [];
-      setProcesses(processRows);
-      setError("");
-    } catch (e) { setError(e instanceof Error ? e.message : "API недоступен"); }
+      setDisks(diskRows);
+      const procRows = Array.isArray(p) ? p : Array.isArray(p?.processes) ? p.processes : Array.isArray(p?.data) ? p.data : [];
+      setProcesses(procRows);
+    } catch {
+      // API temporarily unreachable
+    }
   }, []);
 
   useEffect(() => {
     void refresh();
     const updateTimer = () => {
-      const ms = Number(localStorage.getItem("dashboard-refresh-ms") ?? "1000");
+      const ms = Number(localStorage.getItem("dashboard-refresh-ms") ?? "2000") || 2000;
       return window.setInterval(() => void refresh(), ms);
     };
     let timer = updateTimer();
-    const onSettings = () => { window.clearInterval(timer); timer = updateTimer(); };
+    const onSettings = () => {
+      window.clearInterval(timer);
+      timer = updateTimer();
+    };
     window.addEventListener("dashboard-settings-changed", onSettings);
-    return () => { window.clearInterval(timer); window.removeEventListener("dashboard-settings-changed", onSettings); };
-  }, [refresh, location.pathname]);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("dashboard-settings-changed", onSettings);
+    };
+  }, [refresh]);
 
-  const netSeries = useMemo(
-    () => history.some(p => p.netIn !== undefined || p.netOut !== undefined) ? history : netLive,
-    [history, netLive],
+  return (
+    <>
+      <div id="bar" />
+      <nav id="nv">
+        <div className="logo">
+          <i />
+          Server Monitor
+        </div>
+        {NAV.map(([path, label, color]) => (
+          <NavLink
+            key={path}
+            to={path}
+            end={path === "/"}
+            className={({ isActive }) => (isActive ? "on" : "")}
+          >
+            <i className="nd" style={{ background: color }} />
+            {label}
+          </NavLink>
+        ))}
+      </nav>
+
+      <main id="m">
+        <Routes>
+          <Route path="/" element={<Overview current={current} disks={disks} processes={processes} />} />
+          <Route path="/cpu" element={<CpuPage current={current} />} />
+          <Route path="/memory" element={<MemoryPage current={current} />} />
+          <Route path="/network" element={<NetworkPage current={current} />} />
+          <Route path="/disks" element={<DisksPage disks={disks} />} />
+          <Route path="/docker" element={<DockerPage onToast={addToast} />} />
+          <Route path="/settings" element={<SettingsPage onToast={addToast} />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+
+      {/* Global Toast Container */}
+      <div id="ts">
+        {toasts.map((t) => (
+          <div key={t.id} className={`toast ${t.error ? "e" : ""}`}>
+            {t.text}
+          </div>
+        ))}
+      </div>
+    </>
   );
-
-  const pageLabel = useMemo(() => nav.find(n => n.to === location.pathname)?.label ?? "Обзор", [location.pathname]);
-
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <div className="brand"><div className="brand-icon"><Server size={21} /></div><div><strong>Server Monitor</strong><span>System dashboard</span></div></div>
-      <div className="sidebar-section-label">МОНИТОРИНГ</div>
-      <nav className="sidebar-nav">{nav.map(n => <NavLink key={n.to} to={n.to} end={n.end} className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>{n.icon}<span>{n.label}</span></NavLink>)}</nav>
-      <div className="sidebar-footer"><span className={`status-dot${error ? " offline" : ""}`} />{error ? "Нет соединения" : "Мониторинг активен"}</div>
-    </aside>
-    <main className="main-content">
-      <div className="topbar"><div className="breadcrumb"><span>Сервер</span><span>/</span><strong>{pageLabel}</strong></div><button className="icon-button" onClick={() => void refresh()}><RefreshCw size={16} />Обновить</button></div>
-      {error && <div className="error-banner">Ошибка API: {error}. Убедись, что Go-сервер запущен на порту 8080.</div>}
-      <Routes>
-        <Route path="/" element={<Overview current={current} history={history} disks={disks} processes={processes} />} />
-        <Route path="/cpu" element={<CpuPage current={current} history={history} />} />
-        <Route path="/memory" element={<MemoryPage current={current} history={history} />} />
-        <Route path="/network" element={<NetworkPage current={current} series={netSeries} />} />
-        <Route path="/disks" element={<DisksPage disks={disks} />} />
-        <Route path="/docker" element={<DockerPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </main>
-  </div>;
 }

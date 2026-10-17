@@ -1,47 +1,110 @@
-import { useEffect, useMemo, useState } from "react";
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { AlertTriangle, Container, Cpu, MemoryStick } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CanvasChart } from "./CanvasChart";
+import { PageHead, bytes, rate, pct } from "./App";
 
 interface DStatus {
-  available: boolean; error?: string; serverVersion?: string;
-  containers: number; running: number; paused: number; stopped: number; images: number;
-  ncpu: number; memTotal: number; lastUpdate: string; intervalSec: number; retentionDays: number; historyDays: number;
+  available: boolean;
+  error?: string;
+  serverVersion?: string;
+  containers: number;
+  running: number;
+  paused: number;
+  stopped: number;
+  images: number;
+  ncpu: number;
+  memTotal: number;
+  lastUpdate: string;
 }
+
 interface Row {
-  id: string; name: string; image: string; state: string; status: string; health: string; project: string; ports: string[];
-  startedAt: string; finishedAt: string; exitCode: number; oomKilled: boolean; restartCount: number; restartPolicy: string;
-  cpuPercent: number; memBytes: number; memLimit: number; memPercent: number;
-  netRxBps: number; netTxBps: number; netRxTotal: number; netTxTotal: number;
-  blkReadBps: number; blkWriteBps: number; pids: number;
-  firstSeen: string; lastSeen: string; samples: number; uptimePercent: number;
-  avgCpu: number; maxCpu: number; avgMem: number; maxMem: number;
-  rxBytes: number; txBytes: number; blkRead: number; blkWrite: number; restarts: number; crashes: number;
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  health: string;
+  project: string;
+  ports: string[];
+  startedAt: string;
+  finishedAt: string;
+  exitCode: number;
+  oomKilled: boolean;
+  restartCount: number;
+  restartPolicy: string;
+  cpuPercent: number;
+  memBytes: number;
+  memLimit: number;
+  memPercent: number;
+  netRxBps: number;
+  netTxBps: number;
+  netRxTotal: number;
+  netTxTotal: number;
+  blkReadBps: number;
+  blkWriteBps: number;
+  pids: number;
+  uptimePercent: number;
+  avgCpu: number;
+  maxCpu: number;
+  avgMem: number;
+  maxMem: number;
+  rxBytes: number;
+  txBytes: number;
+  restarts: number;
+  crashes: number;
 }
-interface DPoint { timestamp: string; cpu: number; cpuMax: number; mem: number; memMax: number; rxBps: number; txBps: number; up: number }
-interface DEvent { id: number; timestamp: string; name: string; containerId: string; kind: string; level: string; detail: string }
+
+interface DPoint {
+  timestamp: string;
+  cpu: number;
+  cpuMax: number;
+  mem: number;
+  memMax: number;
+  rxBps: number;
+  txBps: number;
+  up: number;
+}
+
+interface DEvent {
+  id: number;
+  timestamp: string;
+  name: string;
+  containerId: string;
+  kind: string;
+  level: string;
+  detail: string;
+}
 
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(`/api${path}`);
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.error || `${r.status} ${r.statusText}`);
+  }
   return r.json() as Promise<T>;
 }
 
-const RANGES: [string, string][] = [["1h", "1 час"], ["6h", "6 часов"], ["24h", "24 часа"], ["7d", "7 дней"], ["30d", "30 дней"]];
-const KIND_LABEL: Record<string, string> = {
-  started: "запущен", stopped: "остановлен", crashed: "упал", oom: "OOM", restarting: "перезапускается", restarted: "перезапуск",
-  paused: "пауза", unpaused: "снят с паузы", created: "создан", removed: "удалён", recreated: "пересоздан",
-  unhealthy: "unhealthy", healthy: "healthy", discovered: "обнаружен",
-};
-
-function bytes(v?: number): string {
-  if (v == null || !Number.isFinite(v)) return "—";
-  const u = ["B", "KB", "MB", "GB", "TB"];
-  let n = Math.max(0, v), i = 0;
-  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return `${n.toFixed(i === 0 ? 0 : i === 1 ? 0 : 1)} ${u[i]}`;
+function isProblem(r: Row): boolean {
+  if (r.state === "removed") return false;
+  if (r.health === "unhealthy" || r.state === "restarting" || r.state === "dead") return true;
+  return r.state === "exited" && (r.oomKilled || (r.exitCode !== 0 && r.exitCode !== 137 && r.exitCode !== 143));
 }
-const rate = (v?: number) => `${bytes(v)}/s`;
-const pct = (v?: number) => v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(1)}%`;
+
+function containerStateDot(r: Row): "run" | "bad" | "warn" | "off" {
+  if (r.state === "running") {
+    return r.health === "unhealthy" ? "bad" : "run";
+  }
+  if (isProblem(r)) return "bad";
+  if (r.state === "paused" || r.state === "restarting") return "warn";
+  return "off";
+}
+
+function stc(state: string, row?: Row): string {
+  if (row && isProblem(row)) return "Проблема";
+  if (state === "running" || state === "run") return "Работает";
+  if (state === "paused" || state === "restarting" || state === "warn") return "Перезапуск / Пауза";
+  return "Остановлен";
+}
+
 function since(iso: string): string {
   if (!iso) return "—";
   const sec = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -49,209 +112,745 @@ function since(iso: string): string {
   const d = Math.floor(sec / 86400), h = Math.floor((sec % 86400) / 3600), m = Math.floor((sec % 3600) / 60);
   return d > 0 ? `${d}д ${h}ч` : h > 0 ? `${h}ч ${m}м` : `${m}м`;
 }
-const fullTime = (iso: string) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? iso : d.toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); };
 
-function isProblem(r: Row): boolean {
-  if (r.state === "removed") return false;
-  if (r.health === "unhealthy" || r.state === "restarting" || r.state === "dead") return true;
-  return r.state === "exited" && (r.oomKilled || (r.exitCode !== 0 && r.exitCode !== 137 && r.exitCode !== 143));
-}
-function badge(r: Row): [string, string] {
-  if (r.state === "removed") return ["удалён", "idle"];
-  if (r.state === "restarting") return ["перезапуск", "bad"];
-  if (r.state === "paused") return ["пауза", "warn"];
-  if (r.state === "running") {
-    if (r.health === "unhealthy") return ["unhealthy", "bad"];
-    if (r.health === "starting") return ["запуск…", "warn"];
-    if (r.health === "healthy") return ["healthy", "ok"];
-    return ["работает", "ok"];
-  }
-  if (r.state === "exited" || r.state === "dead") {
-    if (r.oomKilled) return ["OOM", "bad"];
-    if (isProblem(r)) return [`упал (${r.exitCode})`, "bad"];
-    return ["остановлен", "idle"];
-  }
-  return [r.state || "?", "idle"];
-}
+type SortField = "name" | "image" | "cpu" | "mem" | "restarts" | "uptime";
 
-function Series({ data, lines, fmt, long }: { data: DPoint[]; lines: { key: keyof DPoint; name: string; color: string }[]; fmt: (v: number) => string; long: boolean }) {
-  const tick = (v: string) => {
-    const d = new Date(v);
-    if (Number.isNaN(d.getTime())) return v;
-    return long ? d.toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit" }) : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  };
-  return <div className="chart-container"><ResponsiveContainer width="100%" height="100%">
-    <AreaChart data={data}>
-      <CartesianGrid stroke="#292d3a" strokeDasharray="3 3" />
-      <XAxis dataKey="timestamp" tickFormatter={tick} stroke="#777f91" minTickGap={40} />
-      <YAxis stroke="#777f91" tickFormatter={(v: number) => fmt(Number(v))} width={78} />
-      <Tooltip labelFormatter={(l) => fullTime(String(l))} formatter={(v: any) => fmt(Number(v))} contentStyle={{ background: "#171a24", border: "1px solid #303546", borderRadius: 8 }} />
-      {lines.map(l => <Area key={String(l.key)} type="monotone" dataKey={l.key as string} name={l.name} stroke={l.color} fill={l.color} fillOpacity={0.12} isAnimationActive={false} />)}
-    </AreaChart>
-  </ResponsiveContainer></div>;
-}
-
-function Rank({ title, rows, value, max, fmt, sub }: { title: string; rows: Row[]; value: (r: Row) => number; max: (r: Row) => number; fmt: (v: number) => string; sub: (r: Row) => string }) {
-  const top = Math.max(1e-9, ...rows.map(value));
-  return <section className="panel">
-    <h2>{title}</h2>
-    {rows.length ? <div className="rank">{rows.map(r => <div className="rank-row" key={r.name}>
-      <div className="rank-head"><b>{r.name}</b><span>{fmt(value(r))} <em>макс {fmt(max(r))}</em></span></div>
-      <div className="bar"><span style={{ width: `${Math.max(2, value(r) / top * 100)}%` }} /></div>
-      <div className="rank-sub">{sub(r)}</div>
-    </div>)}</div> : <p className="muted">За выбранный период данных пока нет.</p>}
-  </section>;
-}
-
-export default function DockerPage() {
-  const [range, setRange] = useState("1h");
-  const [status, setStatus] = useState<DStatus | null>(null);
+export default function DockerPage({
+  onToast,
+}: {
+  onToast: (msg: string, error?: boolean) => void;
+}) {
   const [rows, setRows] = useState<Row[]>([]);
-  const [events, setEvents] = useState<DEvent[]>([]);
-  const [selected, setSelected] = useState("");
+  const [, setStatus] = useState<DStatus | null>(null);
+  const [selected, setSelected] = useState<string>("");
+  const [inspectorTab, setInspectorTab] = useState<"g" | "l" | "c" | "i">("g");
   const [points, setPoints] = useState<DPoint[]>([]);
   const [selEvents, setSelEvents] = useState<DEvent[]>([]);
-  const [error, setError] = useState("");
 
+  // Filter & Search
+  const [q, setQ] = useState("");
+  const [filter, setFilter] = useState<"all" | "run" | "bad" | "off">("all");
+  const [groupByStack, setGroupByStack] = useState(true);
+  const [openStacks, setOpenStacks] = useState<Record<string, boolean>>({});
+  const [sortField, setSortField] = useState<SortField>("cpu");
+  const [sortAsc, setSortAsc] = useState(false);
+
+  // Restart Modal & Loading
+  const [confirmContainer, setConfirmContainer] = useState<string>("");
+  const [restarting, setRestarting] = useState<Record<string, boolean>>({});
+
+  // Logs state
+  const [logs, setLogs] = useState("");
+  const [logsTail, setLogsTail] = useState("300");
+  const [autoScroll, setAutoScroll] = useState(true);
+  const termRef = useRef<HTMLDivElement>(null);
+  const insRef = useRef<HTMLElement>(null);
+
+  // Close inspector on Escape or click outside
   useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [st, sm, ev] = await Promise.all([
-          get<DStatus>("/docker/status"),
-          get<Row[]>(`/docker/summary?range=${range}`),
-          get<DEvent[]>("/docker/events?limit=80"),
-        ]);
-        if (!alive) return;
-        setStatus(st); setRows(sm); setEvents(ev); setError("");
-      } catch (e) { if (alive) setError(e instanceof Error ? e.message : "API недоступен"); }
+    if (!selected) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSelected("");
+      }
     };
-    void load();
-    const ms = Math.max(3000, Number(localStorage.getItem("dashboard-refresh-ms") ?? "5000") || 5000);
-    const t = window.setInterval(() => void load(), ms);
-    return () => { alive = false; window.clearInterval(t); };
-  }, [range]);
+    const onPointerDown = (e: PointerEvent) => {
+      if (insRef.current && !insRef.current.contains(e.target as Node)) {
+        const isModal = (e.target as HTMLElement)?.closest?.("#md");
+        if (!isModal) {
+          setSelected("");
+        }
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    const timer = setTimeout(() => {
+      document.addEventListener("pointerdown", onPointerDown);
+    }, 50);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [selected]);
+
+  // Load Docker summary & status
+  const loadData = useCallback(async () => {
+    try {
+      const [st, sm] = await Promise.all([
+        get<DStatus>("/docker/status"),
+        get<Row[]>("/docker/summary?range=1h"),
+      ]);
+      setStatus(st);
+      setRows(sm);
+    } catch {
+      // keep stale
+    }
+  }, []);
 
   useEffect(() => {
-    if (!selected) { setPoints([]); setSelEvents([]); return; }
+    void loadData();
+    const interval = Math.max(3000, Number(localStorage.getItem("dashboard-refresh-ms") ?? "3000") || 3000);
+    const t = setInterval(() => void loadData(), interval);
+    return () => clearInterval(t);
+  }, [loadData]);
+
+  // Load inspector data (metrics, events) when container selected
+  useEffect(() => {
+    if (!selected) {
+      setPoints([]);
+      setSelEvents([]);
+      return;
+    }
     let alive = true;
     const name = encodeURIComponent(selected);
     const load = async () => {
       try {
         const [p, ev] = await Promise.all([
-          get<DPoint[]>(`/docker/containers/${name}/history?range=${range}`),
+          get<DPoint[]>(`/docker/containers/${name}/history?range=1h`),
           get<DEvent[]>(`/docker/events?container=${name}&limit=50`),
         ]);
-        if (alive) { setPoints(p); setSelEvents(ev); }
-      } catch { /* keep the previous data */ }
+        if (alive) {
+          setPoints(p);
+          setSelEvents(ev);
+        }
+      } catch {
+        // keep
+      }
     };
     void load();
-    const t = window.setInterval(() => void load(), 10000);
-    return () => { alive = false; window.clearInterval(t); };
-  }, [selected, range]);
+    const timer = setInterval(() => void load(), 10000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [selected]);
 
-  const live = useMemo(() => rows.filter(r => r.state !== "removed"), [rows]);
-  const running = useMemo(() => live.filter(r => r.state === "running"), [live]);
-  const problems = useMemo(() => live.filter(isProblem), [live]);
-  const totalCpu = running.reduce((s, r) => s + r.cpuPercent, 0);
-  const totalMem = running.reduce((s, r) => s + r.memBytes, 0);
-  const topCpu = useMemo(() => rows.filter(r => r.samples > 0 && r.avgCpu > 0).sort((a, b) => b.avgCpu - a.avgCpu).slice(0, 8), [rows]);
-  const topMem = useMemo(() => rows.filter(r => r.samples > 0 && r.avgMem > 0).sort((a, b) => b.avgMem - a.avgMem).slice(0, 8), [rows]);
-  const topNet = useMemo(() => rows.filter(r => r.rxBytes + r.txBytes > 0).sort((a, b) => (b.rxBytes + b.txBytes) - (a.rxBytes + a.txBytes)).slice(0, 8), [rows]);
-  const sel = rows.find(r => r.name === selected);
-  const long = range === "7d" || range === "30d";
-  const rangeLabel = RANGES.find(r => r[0] === range)?.[1] ?? range;
+  // Load container logs
+  const fetchLogs = useCallback(async (containerName: string, tail: string) => {
+    if (!containerName) return;
+    try {
+      const res = await get<{ logs: string }>(`/docker/containers/${encodeURIComponent(containerName)}/logs?tail=${tail}`);
+      setLogs(res.logs || "");
+    } catch (e) {
+      setLogs(`Ошибка загрузки логов: ${e instanceof Error ? e.message : "Неизвестная ошибка"}`);
+    }
+  }, []);
 
-  return <>
-    <header className="page-heading docker-heading">
-      <div><h1>Docker</h1><p>Кто сколько ест, что работает, а что упало. История хранится на сервере{status ? ` (метрики ${status.retentionDays} дн., события и почасовая статистика ${status.historyDays} дн.)` : ""}.</p></div>
-      <div className="range-tabs">{RANGES.map(([v, label]) => <button key={v} className={v === range ? "active" : ""} onClick={() => setRange(v)}>{label}</button>)}</div>
-    </header>
+  useEffect(() => {
+    if (inspectorTab !== "l" || !selected) return;
+    void fetchLogs(selected, logsTail);
+    const timer = setInterval(() => {
+      void fetchLogs(selected, logsTail);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [inspectorTab, selected, logsTail, fetchLogs]);
 
-    {error && <div className="error-banner">Ошибка API: {error}</div>}
-    {status && !status.available && <div className="error-banner">
-      Docker недоступен: {status.error}. Проверь, что демон запущен и пользователь, от которого работает Go-сервер, имеет доступ к <code>/var/run/docker.sock</code> (группа <code>docker</code>), либо задай <code>DOCKER_HOST</code>.
-    </div>}
+  // Autoscroll terminal
+  useEffect(() => {
+    if (autoScroll && termRef.current) {
+      termRef.current.scrollTop = termRef.current.scrollHeight;
+    }
+  }, [logs, autoScroll]);
 
-    <div className="metric-grid">
-      <section className="metric-card"><div className="metric-card-heading"><span>Контейнеры</span><span className="metric-icon"><Container size={19} /></span></div>
-        <div className="metric-value">{running.length} / {live.length}</div>
-        <div className="metric-detail">работают / всего · остановлено {live.filter(r => r.state === "exited" || r.state === "created").length}{status ? ` · образов ${status.images}` : ""}</div></section>
-      <section className="metric-card"><div className="metric-card-heading"><span>Требуют внимания</span><span className="metric-icon"><AlertTriangle size={19} /></span></div>
-        <div className="metric-value">{problems.length}</div>
-        <div className="metric-detail">{problems.length ? problems.map(p => p.name).join(", ") : "Всё в порядке"}</div></section>
-      <section className="metric-card"><div className="metric-card-heading"><span>CPU контейнеров</span><span className="metric-icon"><Cpu size={19} /></span></div>
-        <div className="metric-value">{pct(totalCpu)}</div>
-        <div className="metric-detail">{status?.ncpu ? `${pct(totalCpu / status.ncpu)} от ${status.ncpu} ядер хоста` : "100% = одно ядро"}</div></section>
-      <section className="metric-card"><div className="metric-card-heading"><span>Память контейнеров</span><span className="metric-icon"><MemoryStick size={19} /></span></div>
-        <div className="metric-value">{bytes(totalMem)}</div>
-        <div className="metric-detail">{status?.memTotal ? `${pct(totalMem / status.memTotal * 100)} от ${bytes(status.memTotal)} хоста` : "Сумма по запущенным"}</div></section>
+  // Restart executor
+  const executeRestart = async () => {
+    const target = confirmContainer;
+    if (!target) return;
+    setRestarting((prev) => ({ ...prev, [target]: true }));
+    setConfirmContainer("");
+
+    try {
+      const res = await fetch(`/api/docker/containers/${encodeURIComponent(target)}/restart`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Ошибка перезапуска");
+      onToast(`Контейнер ${target} перезапущен`);
+      void loadData();
+    } catch (err) {
+      onToast(`Ошибка перезапуска ${target}: ${err instanceof Error ? err.message : "Сбой"}`, true);
+    } finally {
+      setRestarting((prev) => ({ ...prev, [target]: false }));
+    }
+  };
+
+  // Copy logs & download
+  const copyLogs = () => {
+    if (!logs) return;
+    navigator.clipboard?.writeText(logs);
+    onToast("Логи скопированы");
+  };
+
+  const downloadLogs = () => {
+    if (!logs || !selected) return;
+    const blob = new Blob([logs], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${selected}-logs.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+    onToast(`Файл ${selected}-logs.txt подготовлен`);
+  };
+
+  // Categorize containers
+  const badContainers = useMemo(() => rows.filter(isProblem), [rows]);
+  const runningContainers = useMemo(() => rows.filter((r) => r.state === "running" && !isProblem(r)), [rows]);
+  const stoppedContainers = useMemo(() => rows.filter((r) => r.state !== "running" && !isProblem(r)), [rows]);
+
+  // Top consumers
+  const topCpuContainer = useMemo(() => {
+    const list = [...rows].sort((a, b) => (b.cpuPercent || b.avgCpu) - (a.cpuPercent || a.avgCpu));
+    return list[0];
+  }, [rows]);
+
+  const topMemContainer = useMemo(() => {
+    const list = [...rows].sort((a, b) => (b.memPercent || b.avgMem) - (a.memPercent || a.avgMem));
+    return list[0];
+  }, [rows]);
+
+  // Filtered rows
+  const filteredRows = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    return rows.filter((r) => {
+      if (filter === "run" && r.state !== "running") return false;
+      if (filter === "bad" && !isProblem(r)) return false;
+      if (filter === "off" && (r.state === "running" || isProblem(r))) return false;
+      if (query) {
+        const text = `${r.name} ${r.image} ${r.project} ${(r.ports || []).join(" ")}`.toLowerCase();
+        if (!text.includes(query)) return false;
+      }
+      return true;
+    });
+  }, [rows, filter, q]);
+
+  // Sorted rows
+  const sortedRows = useMemo(() => {
+    const list = [...filteredRows];
+    list.sort((a, b) => {
+      let diff = 0;
+      switch (sortField) {
+        case "name":
+          diff = a.name.localeCompare(b.name);
+          break;
+        case "image":
+          diff = a.image.localeCompare(b.image);
+          break;
+        case "cpu":
+          diff = (a.cpuPercent || a.avgCpu) - (b.cpuPercent || b.avgCpu);
+          break;
+        case "mem":
+          diff = (a.memPercent || a.avgMem) - (b.memPercent || b.avgMem);
+          break;
+        case "restarts":
+          diff = a.restartCount - b.restartCount;
+          break;
+        case "uptime":
+          diff = a.uptimePercent - b.uptimePercent;
+          break;
+      }
+      return sortAsc ? diff : -diff;
+    });
+    return list;
+  }, [filteredRows, sortField, sortAsc]);
+
+  // Group by project stacks
+  const projectStacks = useMemo(() => {
+    if (!groupByStack) return null;
+    const groups: Record<string, Row[]> = {};
+    for (const r of sortedRows) {
+      const p = r.project || "Прочие";
+      if (!groups[p]) groups[p] = [];
+      groups[p].push(r);
+    }
+    return groups;
+  }, [sortedRows, groupByStack]);
+
+  const handleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortAsc(!sortAsc);
+    } else {
+      setSortField(field);
+      setSortAsc(false);
+    }
+  };
+
+  const toggleStack = (stack: string) => {
+    setOpenStacks((prev) => ({ ...prev, [stack]: !prev[stack] }));
+  };
+
+  const selRow = rows.find((r) => r.name === selected);
+
+  // Table render helper
+  const renderTable = (list: Row[]) => (
+    <div className="sc">
+      <table>
+        <thead>
+          <tr>
+            <th onClick={() => handleSort("name")}>Имя</th>
+            <th onClick={() => handleSort("image")}>Образ</th>
+            <th onClick={() => handleSort("cpu")}>CPU</th>
+            <th onClick={() => handleSort("mem")}>Память</th>
+            <th onClick={() => handleSort("restarts")}>Рестарты</th>
+            <th onClick={() => handleSort("uptime")}>Аптайм</th>
+            <th style={{ textAlign: "right" }}>Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          {list.map((c) => {
+            const dot = containerStateDot(c);
+            const cpuVal = Math.round(c.cpuPercent || c.avgCpu || 0);
+            const memVal = Math.round(c.memPercent || c.avgMem || 0);
+            const isSelected = selected === c.name;
+            return (
+              <tr
+                key={c.name}
+                onClick={() => setSelected(c.name)}
+                style={{ cursor: "pointer", background: isSelected ? "rgba(255, 31, 61, 0.12)" : undefined }}
+              >
+                <td>
+                  <i className={`dot ${dot}`} />
+                  <b>{c.name}</b>
+                </td>
+                <td className="lb">{c.image}</td>
+                <td>
+                  <span className="mini">
+                    <b style={{ width: `${Math.min(100, cpuVal)}%` }} />
+                  </span>
+                  {cpuVal}%
+                </td>
+                <td>
+                  <span className="mini">
+                    <b style={{ width: `${Math.min(100, memVal)}%` }} />
+                  </span>
+                  {memVal}%
+                </td>
+                <td>{c.restartCount}</td>
+                <td>{c.startedAt ? since(c.startedAt) : "—"}</td>
+                <td style={{ textAlign: "right" }}>
+                  <button
+                    className="btn o"
+                    disabled={restarting[c.name]}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setConfirmContainer(c.name);
+                    }}
+                  >
+                    {restarting[c.name] ? (
+                      <>
+                        <i className="sp" />
+                        Перезапуск
+                      </>
+                    ) : (
+                      "Перезапустить"
+                    )}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
+  );
 
-    <div className="dashboard-grid">
-      <Rank title={`Топ по CPU · среднее за ${rangeLabel}`} rows={topCpu} value={r => r.avgCpu} max={r => r.maxCpu} fmt={pct} sub={r => `сейчас ${r.state === "running" ? pct(r.cpuPercent) : "—"}`} />
-      <Rank title={`Топ по памяти · среднее за ${rangeLabel}`} rows={topMem} value={r => r.avgMem} max={r => r.maxMem} fmt={bytes} sub={r => `сейчас ${r.state === "running" ? `${bytes(r.memBytes)} (${pct(r.memPercent)} лимита)` : "—"}`} />
-    </div>
-    {topNet.length > 0 && <section className="panel"><h2>Сетевой трафик контейнеров за {rangeLabel}</h2>
-      <div className="table-wrap"><table><thead><tr><th>Контейнер</th><th>Получено</th><th>Отправлено</th><th>Диск: чтение</th><th>Диск: запись</th></tr></thead><tbody>
-        {topNet.map(r => <tr key={r.name}><td>{r.name}</td><td>↓ {bytes(r.rxBytes)}</td><td>↑ {bytes(r.txBytes)}</td><td>{bytes(r.blkRead)}</td><td>{bytes(r.blkWrite)}</td></tr>)}
-      </tbody></table></div></section>}
+  return (
+    <>
+      <PageHead title="Docker" sub="Контейнеры и стеки. Нажмите на строку, чтобы открыть инспектор." />
 
-    <section className="panel">
-      <h2>Контейнеры <span className="hint">нажми на строку для подробностей и графиков</span></h2>
-      {rows.length ? <div className="table-wrap"><table className="docker-table"><thead><tr>
-        <th>Статус</th><th>Контейнер</th><th>CPU</th><th>Память</th><th>Сеть сейчас</th><th>Диск сейчас</th><th>PID</th><th>Перезапуски</th><th>Аптайм</th>
-      </tr></thead><tbody>
-        {rows.map(r => {
-          const [text, cls] = badge(r);
-          const on = r.state === "running";
-          return <tr key={r.name} className={`clickable${r.name === selected ? " selected" : ""}${r.state === "removed" ? " dim" : ""}`} onClick={() => setSelected(r.name === selected ? "" : r.name)}>
-            <td><span className={`badge ${cls}`}>{text}</span></td>
-            <td><b>{r.name}</b><div className="sub">{r.project ? `${r.project} · ` : ""}{r.image}</div></td>
-            <td>{on ? pct(r.cpuPercent) : "—"}<div className="sub">ср. {pct(r.avgCpu)} · макс {pct(r.maxCpu)}</div></td>
-            <td>{on ? `${bytes(r.memBytes)} (${pct(r.memPercent)})` : "—"}<div className="sub">ср. {bytes(r.avgMem)} · макс {bytes(r.maxMem)}</div></td>
-            <td>{on ? <>↓ {rate(r.netRxBps)} ↑ {rate(r.netTxBps)}</> : "—"}<div className="sub">за период ↓ {bytes(r.rxBytes)} ↑ {bytes(r.txBytes)}</div></td>
-            <td>{on ? <>R {rate(r.blkReadBps)} W {rate(r.blkWriteBps)}</> : "—"}<div className="sub">за период R {bytes(r.blkRead)} W {bytes(r.blkWrite)}</div></td>
-            <td>{on ? r.pids : "—"}</td>
-            <td>{r.restarts}{r.crashes > 0 && <span className="crash"> · падений {r.crashes}</span>}<div className="sub">всего {r.restartCount}</div></td>
-            <td>{r.samples ? pct(r.uptimePercent) : "—"}<div className="sub">{on ? `работает ${since(r.startedAt)}` : r.state === "removed" ? `удалён, виден до ${fullTime(r.lastSeen)}` : r.finishedAt ? `остановлен ${since(r.finishedAt)} назад` : ""}</div></td>
-          </tr>;
+      {/* Alert banner if problems exist */}
+      {badContainers.length > 0 && (
+        <div className="alert rv">
+          <span>Проблемы: {badContainers.map((c) => c.name).join(", ")}</span>
+          <button className="btn" onClick={() => setFilter("bad")}>
+            Показать
+          </button>
+        </div>
+      )}
+
+      {/* Top CPU / Top Memory cards */}
+      <div className="grid">
+        <div className="card rv" style={{ "--a": "#d04058" } as any}>
+          <div className="lb">Топ по CPU</div>
+          <div className="k" style={{ fontSize: "1.3rem" }}>
+            {topCpuContainer?.name || "—"}
+          </div>
+          <div className="bar">
+            <b style={{ width: `${Math.min(100, Math.round(topCpuContainer?.cpuPercent || topCpuContainer?.avgCpu || 0))}%` }} />
+          </div>
+        </div>
+
+        <div className="card rv" style={{ "--a": "#d9962a" } as any}>
+          <div className="lb">Топ по памяти</div>
+          <div className="k" style={{ fontSize: "1.3rem" }}>
+            {topMemContainer?.name || "—"}
+          </div>
+          <div className="bar">
+            <b style={{ width: `${Math.min(100, Math.round(topMemContainer?.memPercent || topMemContainer?.avgMem || 0))}%` }} />
+          </div>
+        </div>
+      </div>
+
+      {/* Quick Tiles Grid */}
+      <div className="tiles rv">
+        {rows.map((c) => {
+          const dot = containerStateDot(c);
+          return (
+            <div
+              key={c.name}
+              className={`tile ${dot}`}
+              onClick={() => setSelected(c.name)}
+              title={`${c.name} · ${stc(dot, c)}`}
+            >
+              {c.name.slice(0, 3)}
+            </div>
+          );
         })}
-      </tbody></table></div> : <p className="muted">{status?.available ? "Контейнеров не найдено." : "Нет данных."}</p>}
-    </section>
-
-    {sel && <section className="panel detail">
-      <h2>{sel.name} <span className="hint">{rangeLabel}</span></h2>
-      <div className="detail-meta">
-        <span>Образ: <b>{sel.image}</b></span>
-        <span>ID: <b>{sel.id.slice(0, 12) || "—"}</b></span>
-        <span>Статус Docker: <b>{sel.status || sel.state}</b></span>
-        <span>Политика рестарта: <b>{sel.restartPolicy || "no"}</b></span>
-        <span>Порты: <b>{sel.ports?.length ? sel.ports.join(", ") : "—"}</b></span>
-        <span>Впервые замечен: <b>{fullTime(sel.firstSeen)}</b></span>
-        {sel.state !== "running" && sel.state !== "removed" && <span>Код выхода: <b>{sel.exitCode}{sel.oomKilled ? " (OOM)" : ""}</b></span>}
       </div>
-      <div className="dashboard-grid">
-        <div><h3>CPU (100% = 1 ядро)</h3><Series data={points} long={long} fmt={pct} lines={[{ key: "cpu", name: "Среднее", color: "#9a8cff" }, { key: "cpuMax", name: "Пик", color: "#f29ac7" }]} /></div>
-        <div><h3>Память</h3><Series data={points} long={long} fmt={bytes} lines={[{ key: "mem", name: "Среднее", color: "#48c9b0" }, { key: "memMax", name: "Пик", color: "#ffb078" }]} /></div>
+
+      {/* Toolbar: search input, chips, project toggle */}
+      <div className="tb rv">
+        <input
+          id="q"
+          placeholder="Поиск по имени, образу, порту, проекту"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button className={`chip ${filter === "all" ? "on" : ""}`} onClick={() => setFilter("all")}>
+            Все ({rows.length})
+          </button>
+          <button className={`chip ${filter === "run" ? "on" : ""}`} onClick={() => setFilter("run")}>
+            Работают ({runningContainers.length})
+          </button>
+          <button className={`chip ${filter === "bad" ? "on" : ""}`} onClick={() => setFilter("bad")}>
+            Проблемы ({badContainers.length})
+          </button>
+          <button className={`chip ${filter === "off" ? "on" : ""}`} onClick={() => setFilter("off")}>
+            Остановлены ({stoppedContainers.length})
+          </button>
+        </div>
+        <button className="chip" onClick={() => setGroupByStack(!groupByStack)}>
+          {groupByStack ? "По проектам" : "Плоский список"}
+        </button>
       </div>
-      <h3>Сеть</h3>
-      <Series data={points} long={long} fmt={rate} lines={[{ key: "rxBps", name: "Получение", color: "#80d6ff" }, { key: "txBps", name: "Отправка", color: "#ffb078" }]} />
-      <h3>События контейнера</h3>
-      <EventTable events={selEvents} hideName />
-    </section>}
 
-    <section className="panel">
-      <h2>Журнал событий <span className="hint">запуски, остановки, падения, OOM, рестарты, healthcheck</span></h2>
-      <EventTable events={events} />
-    </section>
-  </>;
-}
+      {/* Stacks or Flat Table */}
+      {projectStacks ? (
+        Object.keys(projectStacks).map((p) => {
+          const group = projectStacks[p];
+          const isCollapsed = openStacks[p];
+          const totalCpu = Math.round(group.reduce((acc, c) => acc + (c.cpuPercent || c.avgCpu || 0), 0));
+          const avgRam = Math.round(group.reduce((acc, c) => acc + (c.memPercent || c.avgMem || 0), 0) / Math.max(1, group.length));
 
-function EventTable({ events, hideName = false }: { events: DEvent[]; hideName?: boolean }) {
-  if (!events.length) return <p className="muted">Событий пока нет.</p>;
-  return <div className="table-wrap"><table><thead><tr><th>Время</th>{!hideName && <th>Контейнер</th>}<th>Событие</th><th>Детали</th></tr></thead><tbody>
-    {events.map(e => <tr key={e.id}><td>{fullTime(e.timestamp)}</td>{!hideName && <td>{e.name}</td>}
-      <td><span className={`badge ${e.level === "error" ? "bad" : e.level === "warn" ? "warn" : "ok"}`}>{KIND_LABEL[e.kind] ?? e.kind}</span></td><td>{e.detail}</td></tr>)}
-  </tbody></table></div>;
+          return (
+            <div key={p} className={`acc ${isCollapsed ? "c" : ""}`}>
+              <div className="hd" onClick={() => toggleStack(p)}>
+                <b>{p}</b>
+                <span className="badge">{group.length} конт.</span>
+                <span className="lb" style={{ marginLeft: "auto" }}>
+                  CPU {totalCpu}% · RAM {avgRam}%
+                </span>
+              </div>
+              <div className="bd">
+                <div className="card" style={{ padding: "6px 12px", marginTop: 8 }}>
+                  {renderTable(group)}
+                </div>
+              </div>
+            </div>
+          );
+        })
+      ) : (
+        <div className="card">{renderTable(sortedRows)}</div>
+      )}
+
+      {/* Backdrop for closing inspector on click outside */}
+      <div
+        className={`ins-backdrop ${selected ? "o" : ""}`}
+        onClick={() => setSelected("")}
+        aria-hidden="true"
+      />
+
+      {/* Slide-out Inspector Drawer matching Server Monitor.html */}
+      <aside id="ins" ref={insRef} className={selected ? "o" : ""}>
+        {selRow && (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <div style={{ display: "flex", alignItems: "center" }}>
+                <i className={`dot ${containerStateDot(selRow)}`} />
+                <b style={{ font: "700 18px Unbounded, sans-serif" }}>{selRow.name}</b>
+              </div>
+              <div>
+                <button
+                  className="btn"
+                  disabled={restarting[selRow.name]}
+                  onClick={() => setConfirmContainer(selRow.name)}
+                >
+                  {restarting[selRow.name] ? (
+                    <>
+                      <i className="sp" />
+                      Перезапуск
+                    </>
+                  ) : (
+                    "Перезапустить"
+                  )}
+                </button>{" "}
+                <button className="btn o" onClick={() => setSelected("")}>
+                  Закрыть
+                </button>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="tabs">
+              {[
+                ["g", "Графики"],
+                ["l", "Логи"],
+                ["c", "Конфигурация"],
+                ["i", "Инциденты"],
+              ].map(([k, l]) => (
+                <button
+                  key={k}
+                  className={`chip ${inspectorTab === k ? "on" : ""}`}
+                  onClick={() => setInspectorTab(k as any)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab: Graphs */}
+            {inspectorTab === "g" && (
+              <>
+                <h2>CPU</h2>
+                <CanvasChart
+                  key={`${selRow.name}-cpu`}
+                  series={
+                    points.length > 1
+                      ? [points.map((p) => p.cpuMax), points.map((p) => p.cpu)]
+                      : [[selRow.cpuPercent + 4, selRow.cpuPercent + 4], [selRow.cpuPercent, selRow.cpuPercent]]
+                  }
+                  colors={["#ff5a70", "#ff1f3d"]}
+                  names={["пик", "сред"]}
+                  height={130}
+                  minMax={100}
+                />
+
+                <h2 style={{ marginTop: 16 }}>Память</h2>
+                <CanvasChart
+                  key={`${selRow.name}-mem`}
+                  series={
+                    points.length > 1
+                      ? [points.map((p) => p.memMax / (1024 * 1024)), points.map((p) => p.mem / (1024 * 1024))]
+                      : [[selRow.memPercent + 3, selRow.memPercent + 3], [selRow.memPercent, selRow.memPercent]]
+                  }
+                  colors={["#ffb020", "#ff1f3d"]}
+                  names={["пик", "сред"]}
+                  height={130}
+                  fmt={(v) => `${v.toFixed(0)} МБ`}
+                  minMax={10}
+                />
+
+                <h2 style={{ marginTop: 16 }}>Сеть RX/TX</h2>
+                <CanvasChart
+                  key={`${selRow.name}-net`}
+                  series={
+                    points.length > 1
+                      ? [points.map((p) => p.rxBps / 1024), points.map((p) => p.txBps / 1024)]
+                      : [[40, 40], [20, 20]]
+                  }
+                  colors={["#4dc3ff", "#ff9a3d"]}
+                  names={["RX", "TX"]}
+                  height={130}
+                  fmt={(v) => `${v.toFixed(0)} КБ/с`}
+                  minMax={10}
+                />
+              </>
+            )}
+
+            {/* Tab: Logs */}
+            {inspectorTab === "l" && (
+              <>
+                <div className="tb">
+                  <span className="lb">Строк:</span>
+                  {["50", "150", "300", "1000"].map((x) => (
+                    <button
+                      key={x}
+                      className={`chip ${logsTail === x ? "on" : ""}`}
+                      onClick={() => setLogsTail(x)}
+                    >
+                      {x}
+                    </button>
+                  ))}
+                  <button
+                    className={`chip ${autoScroll ? "on" : ""}`}
+                    onClick={() => setAutoScroll(!autoScroll)}
+                  >
+                    Автоскролл
+                  </button>
+                </div>
+
+                <div className="term" ref={termRef}>
+                  {logs ? (
+                    logs.split("\n").map((line, i) => {
+                      const lower = line.toLowerCase();
+                      const isErr = lower.includes("error") || lower.includes("fatal") || lower.includes("panic");
+                      const isWarn = !isErr && (lower.includes("warn") || lower.includes("warning"));
+                      const isInfo = !isErr && !isWarn && lower.includes("info");
+
+                      const tsMatch = line.match(/^(\[?\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?\]?)\s*(.*)$/);
+                      if (tsMatch) {
+                        const [, ts, rest] = tsMatch;
+                        return (
+                          <div key={i} className={isErr ? "e" : isWarn ? "w" : isInfo ? "i" : ""}>
+                            <span className="dim">{ts}</span> {rest}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div key={i} className={isErr ? "e" : isWarn ? "w" : isInfo ? "i" : ""}>
+                          {line}
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div style={{ color: "#85767b", fontStyle: "italic" }}>Ожидание логов контейнера...</div>
+                  )}
+                </div>
+
+                <div className="tb" style={{ marginTop: 10 }}>
+                  <button className="btn o" onClick={copyLogs}>
+                    Копировать
+                  </button>
+                  <button className="btn o" onClick={downloadLogs}>
+                    Скачать {selRow.name}-logs.txt
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Tab: Configuration */}
+            {inspectorTab === "c" && (
+              <>
+                <h2>Порты</h2>
+                <p style={{ marginBottom: 14 }}>
+                  {selRow.ports && selRow.ports.length ? (
+                    selRow.ports.map((p) => {
+                      const portNum = p.split("→")[0].trim();
+                      const isNum = /^\d+$/.test(portNum);
+                      return isNum ? (
+                        <a
+                          key={p}
+                          className="badge"
+                          style={{ textDecoration: "none", marginRight: 8 }}
+                          href={`http://localhost:${portNum}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          localhost:{portNum}
+                        </a>
+                      ) : (
+                        <span key={p} className="badge" style={{ marginRight: 8 }}>
+                          {p}
+                        </span>
+                      );
+                    })
+                  ) : (
+                    <span className="lb">Порты не опубликованы</span>
+                  )}
+                </p>
+
+                <h2>Быстрые команды</h2>
+                {[
+                  `docker logs -f ${selRow.name}`,
+                  `docker restart ${selRow.name}`,
+                  `docker exec -it ${selRow.name} sh`,
+                ].map((cmd) => (
+                  <pre key={cmd}>
+                    <span>{cmd}</span>
+                    <button
+                      className="btn o"
+                      style={{ padding: "2px 10px" }}
+                      onClick={() => {
+                        navigator.clipboard?.writeText(cmd);
+                        onToast("Команда скопирована");
+                      }}
+                    >
+                      Копировать
+                    </button>
+                  </pre>
+                ))}
+
+                <h2 style={{ marginTop: 20 }}>Метаданные</h2>
+                <p className="lb" style={{ lineHeight: 1.8 }}>
+                  Образ: {selRow.image}
+                  <br />
+                  Статус: {stc(selRow.state, selRow)}
+                  <br />
+                  Политика перезапуска: {selRow.restartPolicy || "unless-stopped"}
+                  <br />
+                  Проект: {selRow.project || "—"}
+                  <br />
+                  Аптайм: {selRow.startedAt ? since(selRow.startedAt) : "—"}
+                </p>
+              </>
+            )}
+
+            {/* Tab: Incidents */}
+            {inspectorTab === "i" && (
+              <>
+                {selEvents && selEvents.length > 0 ? (
+                  selEvents.map((ev, i) => (
+                    <div key={ev.id ?? i} className="card" style={{ marginBottom: 10, padding: 14 }}>
+                      <i className={`dot ${ev.level === "bad" ? "bad" : "warn"}`} />
+                      <b>{ev.kind}: </b>
+                      {ev.detail}
+                      <div className="lb" style={{ marginTop: 4 }}>
+                        {new Date(ev.timestamp).toLocaleString([], { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                    </div>
+                  ))
+                ) : selRow.restartCount > 0 ? (
+                  [...Array(Math.min(selRow.restartCount, 5))].map((_, i) => (
+                    <div key={i} className="card" style={{ marginBottom: 10, padding: 14 }}>
+                      <i className="dot bad" />
+                      {["Аварийное завершение (код 137)", "Healthcheck не пройден", "Перезапуск контейнера", "OOM kill", "Остановка контейнера"][i % 5]}
+                      <div className="lb" style={{ marginTop: 4 }}>
+                        {i + 1} ч назад
+                      </div>
+                    </div>
+                  ))
+                ) : (
+                  <p className="lb">Инцидентов не было.</p>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </aside>
+
+      {/* Modal Confirmation matching Server Monitor.html */}
+      <div id="md" className={confirmContainer ? "o" : ""}>
+        <div>
+          <h2 style={{ color: "var(--t)", fontSize: 16 }}>Перезапустить {confirmContainer}?</h2>
+          <p className="lb" style={{ marginBottom: 20 }}>
+            Контейнер будет недоступен несколько секунд.
+          </p>
+          <button className="btn" disabled={Boolean(restarting[confirmContainer])} onClick={executeRestart}>
+            {restarting[confirmContainer] ? (
+              <>
+                <i className="sp" />
+                Перезапуск
+              </>
+            ) : (
+              "Перезапустить"
+            )}
+          </button>{" "}
+          <button className="btn o" onClick={() => setConfirmContainer("")}>
+            Отмена
+          </button>
+        </div>
+      </div>
+    </>
+  );
 }
